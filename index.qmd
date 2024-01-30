@@ -1,0 +1,991 @@
+---
+title: Research_Insurance-Dynamics
+authors:
+  - name: Norah Jones
+    affiliation: The University
+    roles: writing
+    corresponding: true
+bibliography: references.bib
+editor_options: 
+  chunk_output_type: console
+execute:
+  cache: true  
+---
+
+```{r setup}
+library(tidyverse)
+library(here)
+library(glue)
+library(janitor)
+library(haven)
+library(mstate)
+library(expm)
+library(msm)
+library(MASS)
+library(expm)
+library(knitr)
+library(kableExtra)
+library(dampack)
+library(here)
+library(Hmisc)
+library(hrbrthemes)
+library(ggsci)
+library(janitor)
+#remotes::install_github("davidgohel/flextable")
+library(flextable)
+options(scipen = 5) 
+transpose <- purrr::transpose
+select <- dplyr::select
+
+format_number <- function(x, k = 3, m = 0) {
+    ifelse(x == 0, 
+           "0.0", 
+           ifelse(x >= 1000, 
+                  formatC(round(x, m), format = "f", big.mark = ",", digits = m),
+                  formatC(round(x, k), format = "f", big.mark = ",", digits = k)))
+}
+prepare_multistate_data <- function(df, timevar, statevar, idvar) {
+  tt <- enquo(timevar)
+  ss <- enquo(statevar)
+  id <- enquo(idvar)
+  
+  t0 <- df %>% summarise(min = min(!!tt,na.rm=TRUE))
+  
+  wide_vars <- c(names(df)[-which(names(df) %in% c(quo_name(tt),quo_name(ss)))],"baseline","max_time")
+  
+  df_wide <- 
+    df %>% 
+    group_by(!!id) %>% 
+    mutate(max_time = max(!!tt)) %>% 
+    mutate(!!quo_name(tt) := paste0("tmp_",!!tt)) %>% 
+    arrange(!!id,!!tt) %>%
+    ungroup() %>% 
+    spread(!!tt,!!ss) %>% 
+    mutate(baseline = tmp_1) %>% 
+    gather(!!tt,!!ss,-wide_vars) %>% 
+    filter(!is.na(baseline)) %>% 
+    mutate(!!quo_name(tt) := as.numeric(gsub("tmp_","",!!tt))) %>% 
+    arrange(!!id,!!tt) %>% 
+    group_by(!!id) %>% 
+    mutate(transition = as.integer(baseline != !!ss & !is.na(!!ss))) %>%
+    mutate(censored = as.integer(is.na(!!ss))) %>%
+    mutate(admin_censor = as.integer(max(transition)==0 & max(censored==0) & row_number()==n())) %>%
+    mutate(admin_censor = ifelse(censored==1,0,admin_censor)) %>%
+    mutate(type = 1 * max(transition==1) + 2 * max(censored==1) + 3 * (max(admin_censor==1) & max(censored)!=1)) %>%
+    filter((admin_censor==1 & type == 3) | (type == 1 & transition==1) | (type==2 & censored==1)) %>% 
+    filter(row_number()==1) %>% 
+    ungroup() 
+  
+  transition_types <- df_wide %>% pull(baseline) %>% unique() %>% sort()
+
+  df_wide <- 
+    transition_types %>% 
+    map(~(
+      df_wide %>% mutate(time_to_event = ifelse(transition==1 & !!ss==.x ,!!tt,
+                                          ifelse(censored==1,!!tt,max_time))) %>% 
+        mutate(status = ifelse(transition==1 & !!ss==.x,1,0)) %>% 
+        select(time_to_event,status) %>% 
+        set_names(c(paste0("time_",.x),paste0("status_",.x)))
+    )) %>% bind_cols() %>% 
+    bind_cols(df_wide,.)
+  
+ 
+
+  ls_tmat <- 
+    transition_types %>% 
+    map(~(
+      matrix(t(matrix(c(NA,1:(length(transition_types)-1), rep(rep(NA,length(transition_types)),length(transition_types)-1)),nrow= length(transition_types),ncol= length(transition_types))),
+        nrow = length(transition_types),ncol= length(transition_types),
+             dimnames = list(from = c(.x,transition_types[-which(transition_types==.x)]), to=c(.x,transition_types[-which(transition_types==.x)]))
+               ) 
+    )) %>% 
+    set_names(transition_types)
+  
+  ls_ms <- list()
+
+  for (.x in transition_types) {
+
+    tmat <- ls_tmat[[.x]]
+    
+    df_times <- df_wide %>% filter(baseline==.x) %>% select_at(vars(paste0("time_",colnames(tmat)))) %>% 
+      mutate_at(vars(paste0("time_",.x)),function(x) x = NA) %>% data.frame()
+    
+    df_status <-  df_wide %>% filter(baseline==.x) %>% select_at(vars(paste0("status_",colnames(tmat)))) %>% 
+      mutate_at(vars(paste0("status_",.x)),function(x) x = NA) %>% data.frame()
+    
+    df_covars <- df_wide %>% filter(baseline==.x) %>% select_at(vars(setdiff(wide_vars,c("max_time","baseline")))) %>% 
+      data.frame()
+    
+    df_id <- df_wide %>% filter(baseline==.x) %>% select(!!id) %>% data.frame()
+  
+    df_ms <- msprep(time = df_times, status = df_status, keep = df_covars, trans = tmat) 
+    
+    covs <- setdiff(wide_vars,c("max_time","baseline",quo_name(id)))
+    df_ms <- expand.covs(df_ms,covs, append = TRUE)
+    
+    ls_ms[[.x]] = df_ms
+  }
+
+  out <- list(df_ms = ls_ms, trans_mat = ls_tmat)
+  return(out)
+}
+```
+
+
+[Markov model](https://hbiostat.org/r/hmisc/markov/sim#content)
+
+# Data
+
+```{r download}
+# Source: http://asdfree.com/medical-expenditure-panel-survey-meps.html
+
+# GVA{month}{year}: COV BY OTHER PUBLIC COVERAGE
+# GVB{month}{year}: COV BY OTHER PUBLIC HMO
+# GVC{month}{year}: COV BY OTHER PUBLIC PAYS PREM 
+# HPD{month}{year}: PHOLDER OF PRIV INS (SRC UNKNWN) 
+# HPE{month}{year}: PHOLDER OF EMPL UNION INS
+# HPN{month}{year}: PHOLDER OF NONGROUP INS
+# HPO{month}{year}: PHOLDER OF OTHER GROUP INS
+# HPR{month}{year}: PHOLDER OF PRIVATE INSURANCE
+# HPX{month}{year}: PHOLDER OF PRIV INS THRU EXCH
+# IHS{month}{year}: COV BY INDIAN HEALTH SERVICE
+# INS{month}{year}: COVR BY HOSP/MED INS 
+# MCD{month}{year}{X}: COV BY MEDICAID OR SCHIP 
+# MCR{month}{year}{X}: COV BY MEDICARE
+# PDK{month}{year}: COVR BY PRIV INS (SOURCE UNKNWN) 
+# PEG{month}{year}: COVERED BY EMPL UNION INS 
+# PNE{month}{year}: COV BY NON-ESI,PHLDR OUTSIDE RU
+# PNG{month}{year}: COVERED BY NONGROUP INS
+# POE{month}{year}: COV BY ESI, PHOLDER OUTSIDE RU
+# POG{month}{year}: COVERED BY OTHER GROUP INS
+# PRI{month}{year}: COVERED BY PRIVATE INS
+# PRX{month}{year}: COV BY PRIV INS THROUGH EXCHNG
+# PUB{month}{year}{X}: COVR BY ANY PUBLIC INS 
+# TRI{month}{year}{X}: COVERED BY TRICARE/CHAMPVA
+# VAP{month}{year}{X}: COVERED BY VA
+meps_sas_import <-
+    function( this_url ){
+        
+        this_tf <- tempfile()
+        
+        download.file( this_url , this_tf , mode = 'wb' )
+        
+        this_tbl <- read_sas( this_tf )
+
+        this_df <- data.frame( this_tbl )
+        
+        names( this_df ) <- tolower( names( this_df ) )
+        
+        this_df
+    }
+
+meps_sas_import2 <-
+    function( this_url ){
+        
+        this_tf <- tempfile()
+        
+        download.file( this_url , this_tf , mode = 'wb' )
+        
+        this_tbl <- read_xpt( this_tf )
+
+        this_df <- data.frame( this_tbl )
+        
+        names( this_df ) <- tolower( names( this_df ) )
+        
+        this_df
+    }
+
+
+if (!file.exists(here("_data/meps/h236.rds"))) {
+    meps <-
+        meps_sas_import( "https://meps.ahrq.gov/data_files/pufs/h236/h236v9.zip" )
+    meps %>% write_rds(here("_data/meps/h236.rds"))
+    
+    meps2 <- 
+        meps_sas_import2("https://meps.ahrq.gov/mepsweb/data_files/pufs/h164ssp.zip")
+    meps2 %>% write_rds(here("_data/meps/h164.rds"))
+
+} else {
+    meps <- read_rds(here("_data/meps/h236.rds"))
+    meps2 <- read_rds(here("_data/meps/h164.rds"))
+}
+
+# ins_types <- c("GVA","GVB","GVC","HPD","HPE","HPN","HPO","HPR","HPX","IHS","^INS.*X$","^MCD.*X$","^MCR.*X$","PDK","PEG","PNE","PNG","POE","POG","PRI",
+#                "PRX","^PUB.*X$","^TRI.*X$","^VAP.*(Y1|Y2|Y3|Y4)$") %>% tolower()
+# final_types <- c("gva", "gvb", "gvc", "hpd", "hpe", "hpn", "hpo", "hpr", "hpx", "ihs", "ins", "mcd", "mcr", "pdk", "peg", "pne", "png", "poe", "pog", "pri", "prx", "pub", "tri", "vap")
+
+ins_types <- c("PRI","^INS.*X$","^MCR.*X$","^PUB.*X$") %>% tolower()
+final_types = c("pri","ins","mcr","pub")
+```
+
+```{r processins}
+
+df <- meps
+
+ins_cov <- 
+    ins_types %>% map(~({
+        df[,c("dupersid",grep(.x,colnames(df), value=TRUE))] %>% 
+        select(dupersid,contains("y1"),contains("y2"),contains("y3"),contains("y4")) %>% 
+        rename_all(function(x) gsub("y1",".2018",x)) %>% 
+        rename_all(function(x) gsub("y2",".2019",x)) %>% 
+        rename_all(function(x) gsub("y3",".2020",x)) %>% 
+        rename_all(function(x) gsub("y4",".2021",x)) %>% 
+        rename_all(function(x) gsub("x$","",x)) %>% 
+        select(-contains("ev.2018"),-contains("ev.2019"),-contains("ev.2020"),-contains("ev.2021")) %>% 
+        rename_at(vars(contains("ja.")),function(x) gsub("ja.","_01.",x)) %>% 
+        rename_at(vars(contains("fe.")),function(x) gsub("fe.","_02.",x)) %>% 
+        rename_at(vars(contains("ma.")),function(x) gsub("ma.","_03.",x)) %>% 
+        rename_at(vars(contains("ap.")),function(x) gsub("ap.","_04.",x)) %>% 
+        rename_at(vars(contains("my.")),function(x) gsub("my.","_05.",x)) %>% 
+        rename_at(vars(contains("ju.")),function(x) gsub("ju.","_06.",x)) %>% 
+        rename_at(vars(contains("jl.")),function(x) gsub("jl.","_07.",x)) %>% 
+        rename_at(vars(contains("au.")),function(x) gsub("au.","_08.",x)) %>% 
+        rename_at(vars(contains("se.")),function(x) gsub("se.","_09.",x)) %>% 
+        rename_at(vars(contains("oc.")),function(x) gsub("oc.","_10.",x)) %>% 
+        rename_at(vars(contains("no.")),function(x) gsub("no.","_11.",x)) %>% 
+        rename_at(vars(contains("de.")),function(x) gsub("de.","_12.",x)) %>% 
+        select(dupersid,
+               contains("01."),
+               contains("02."),
+               contains("03."),
+               contains("04."),
+               contains("05."),
+               contains("06."),
+               contains("07."),
+               contains("08."),
+               contains("09."),
+               contains("10."),
+               contains("11."),
+               contains("12.")) %>% 
+        select(-contains(".p.")) %>% 
+        gather(tmp,value,-dupersid) %>% 
+        arrange(dupersid) %>% 
+        as_tibble() %>% 
+        mutate(month = as.numeric(substr(tmp,5,6)),
+               year = as.numeric(substr(tmp,8,11)),
+               type = substr(tmp,1,3)) %>% 
+        select(dupersid,type,month,year,value) %>% 
+        spread(type,value)
+    }))
+
+df_ins <- ins_cov[[1]]
+
+tmp <- 2:length(ins_cov) %>% map(~({
+    df_ins <<- df_ins %>% left_join(ins_cov[[.x]],c("dupersid","month","year"))
+}))
+
+df_ins <- df_ins %>% mutate_at(vars(all_of(final_types)), function(x) ifelse(x==-1,NA,ifelse(x==2,0,ifelse(x==1,1,-99))))  %>% 
+    mutate(unin = 1 - ins) %>% 
+    mutate(type = case_when(
+        ins == 1 & mcr==1 ~ 4,
+        ins ==1 & pri == 1 ~ 1,
+        ins ==1 & pub == 1 ~ 2,
+        unin ==1 ~ 3,
+        .default = NA
+    )) 
+    
+df_baseline <- 
+    df %>% 
+    filter(age1x!=-1) %>% 
+    select(dupersid,dobmm,dobyy, starts_with("agey"),racev1x,racev2x,povlevy1) 
+
+df_final <-
+    df_baseline %>% 
+    inner_join(df_ins,"dupersid") %>% 
+    mutate(age = year - dobyy + -1 * as.integer(month<dobmm)) %>% 
+    select(-starts_with("agey"),-starts_with("dob")) %>% 
+    arrange(dupersid, year, month)
+```
+
+```{r processinspre}
+
+df <- meps2
+
+ins_cov <- 
+    ins_types %>% map(~({
+        df[,c("dupersid",grep(.x,colnames(df), value=TRUE))] %>% 
+        select(dupersid,contains("y1"),contains("y2"),contains("y3"),contains("y4")) %>% 
+        rename_all(function(x) gsub("y1",".2012",x)) %>% 
+        rename_all(function(x) gsub("y2",".2013",x)) %>% 
+        rename_all(function(x) gsub("x$","",x)) %>% 
+        select(-contains("ev.2012"),-contains("ev.2013")) %>% 
+        rename_at(vars(contains("ja.")),function(x) gsub("ja.","_01.",x)) %>% 
+        rename_at(vars(contains("fe.")),function(x) gsub("fe.","_02.",x)) %>% 
+        rename_at(vars(contains("ma.")),function(x) gsub("ma.","_03.",x)) %>% 
+        rename_at(vars(contains("ap.")),function(x) gsub("ap.","_04.",x)) %>% 
+        rename_at(vars(contains("my.")),function(x) gsub("my.","_05.",x)) %>% 
+        rename_at(vars(contains("ju.")),function(x) gsub("ju.","_06.",x)) %>% 
+        rename_at(vars(contains("jl.")),function(x) gsub("jl.","_07.",x)) %>% 
+        rename_at(vars(contains("au.")),function(x) gsub("au.","_08.",x)) %>% 
+        rename_at(vars(contains("se.")),function(x) gsub("se.","_09.",x)) %>% 
+        rename_at(vars(contains("oc.")),function(x) gsub("oc.","_10.",x)) %>% 
+        rename_at(vars(contains("no.")),function(x) gsub("no.","_11.",x)) %>% 
+        rename_at(vars(contains("de.")),function(x) gsub("de.","_12.",x)) %>% 
+        select(dupersid,
+               contains("01."),
+               contains("02."),
+               contains("03."),
+               contains("04."),
+               contains("05."),
+               contains("06."),
+               contains("07."),
+               contains("08."),
+               contains("09."),
+               contains("10."),
+               contains("11."),
+               contains("12.")) %>% 
+        select(-contains(".p.")) %>% 
+        gather(tmp,value,-dupersid) %>% 
+        arrange(dupersid) %>% 
+        as_tibble() %>% 
+        mutate(month = as.numeric(substr(tmp,5,6)),
+               year = as.numeric(substr(tmp,8,11)),
+               type = substr(tmp,1,3)) %>% 
+        select(dupersid,type,month,year,value) %>% 
+        spread(type,value)
+    }))
+
+df_ins <- ins_cov[[1]]
+
+tmp <- 2:length(ins_cov) %>% map(~({
+    df_ins <<- df_ins %>% left_join(ins_cov[[.x]],c("dupersid","month","year"))
+}))
+
+df_ins <- df_ins %>% mutate_at(vars(all_of(final_types)), function(x) ifelse(x==-1,NA,ifelse(x==2,0,ifelse(x==1,1,-99))))  %>% 
+    mutate(unin = 1 - ins) %>% 
+    mutate(type = case_when(
+        ins == 1 & mcr==1 ~ 4,
+        ins ==1 & pri == 1 ~ 1,
+        ins ==1 & pub == 1 ~ 2,
+        unin ==1 ~ 3,
+        .default = NA
+    )) 
+    
+df_baseline <- 
+    df %>% 
+    filter(age1x!=-1) %>% 
+    select(dupersid,dobmm,dobyy, starts_with("agey"),racev1x,racev2x, povlevy1) 
+
+df_final2 <-
+    df_baseline %>% 
+    inner_join(df_ins,"dupersid") %>% 
+    mutate(age = year - dobyy + -1 * as.integer(month<dobmm)) %>% 
+    select(-starts_with("agey"),-starts_with("dob")) %>% 
+    arrange(dupersid, year, month)
+    
+```
+
+# Parameterize
+
+## Basic Parameters
+
+```{r}
+params_ <- list(
+    v_tx_names = c("Post","Pre"),    # Treatment strategies 
+    n_tx = 2,    
+    
+    v_tr_names = c("Private","Public","Uninsured"),
+    v_ab_names = c("Medicare"),
+    n_states = 4,
+    
+    horizon =  45,
+    
+    r_v_disc = 1e-6,
+    Delta_t = 1,
+    age0 = 20,
+    
+    age_categories = c(0,10,18,26,34,39,44,49,54,59,64,1000)
+   
+)
+params <- 
+    with(params_,{
+        modifyList(params_,list(
+            v_names_states = c(v_tr_names, v_ab_names), # health state names
+            omega = horizon/Delta_t,  # Total number of cycles
+            r_v_disc_Delta_t = r_v_disc * Delta_t,  # Cycle discount rate: health outcomes
+            ages = (0:(horizon/Delta_t))*Delta_t + age0, 
+            alpha = length(v_ab_names),
+            tau = length(v_tr_names), 
+            s = length(v_tr_names)*horizon/Delta_t + length(v_ab_names) #total number of states;s=τω+α
+        ))
+    })
+
+params$ages_trace <- params$ages
+params$ages <- params$ages[-length(params$ages)] 
+
+```
+
+## Transition Intensities
+
+
+Source: page 10 in [msm manual](https://cran.r-project.org/web/packages/msm/vignettes/msm-manual.pdf)
+
+$$
+q_{r s}(z(t))=q_{r s}^{(0)} \exp \left(\beta_{r s}^T z(t)\right)
+$$
+$$
+p_{r s}(t-u, z(u))
+$$
+```{r}
+pov_thresh = 200
+
+
+df_traj <- 
+    df_final2 %>% 
+    filter(povlevy1<pov_thresh) %>% 
+    arrange(dupersid,year,month) %>% 
+    mutate(cycle = (year - 2012) * 12 + month ) %>% 
+    select(dupersid,age,racev1x,cycle,type) %>% 
+    
+    # group_by(dupersid) %>%
+    # mutate(transition = as.integer(lead(type) != type & lead(type)!=4))  %>%
+    # mutate(transition = ifelse(is.na(transition),0,transition)) %>%
+    # mutate(first_transition = max(cycle*transition))  %>%
+    # ungroup() %>%
+    # filter(cycle > first_transition & first_transition>0)  %>%
+
+    na.omit() %>% 
+    as_tibble() %>% 
+    group_by(dupersid) %>% 
+    filter(n()>=3) %>% 
+    ungroup() %>% 
+    mutate(age2 = cut(age,breaks = params$age_categories)) %>% 
+    na.omit() %>% 
+    mutate(race = as.factor(racev1x)) %>% 
+    #mutate(type = factor(type,labels = params$v_names_states)) %>% 
+    # Sample EXCLUSION: Medicare -> Other Types of Insurance Not Allowed (only 2 cases)
+    group_by(dupersid) %>% 
+    mutate(nonelderly_medicare = max(type==4 & age <65)) %>% 
+    filter(nonelderly_medicare == 0) %>% 
+    mutate(next_type = lead(type)) %>% 
+    mutate(transition_to_medicare = as.integer(type==4 & lag(type)!=4)) %>% 
+    mutate(transition_to_medicare = ifelse(is.na(transition_to_medicare),0,transition_to_medicare) )  %>% 
+    filter(type!=4 | transition_to_medicare==1) %>% 
+    ungroup() %>% 
+    mutate(age10 = (age - mean(age))/10) %>% 
+    mutate(newly_65 = as.integer(age==65 & lag(age==64)))
+
+P.init <- 
+    df_traj %>% 
+    mutate(next_type = lead(type)) %>% 
+    count(type,next_type) %>% 
+    na.omit() %>% 
+    spread(next_type,n) %>% 
+    data.frame() %>% 
+    column_to_rownames("type") %>% 
+    as.matrix()
+P.init[1,] = P.init[1,]/sum(P.init[,1])
+P.init[2,] = P.init[2,]/sum(P.init[,2])
+P.init[3,] = P.init[3,]/sum(P.init[,3])
+P.init[4,] = c(0,0,0,1)
+P.init[is.na(P.init)] = 0
+     
+Q.init = expm::logm(P.init)
+diag(Q.init) = 0
+Q.init[Q.init<0] = 0
+diag(Q.init) = -rowSums(Q.init)
+Q.init
+
+Q = crudeinits.msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q.init)
+
+fit_pre <- names(table(df_traj$age2)) %>% map(~({
+    msm(type ~ cycle, dupersid, data = df_traj %>% filter(age2==.x), qmatrix = Q, exacttimes=TRUE, covariates = ~age)
+})) %>% 
+    set_names(names(table(df_traj$age2)))
+
+# 
+# fit_pre <- msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q, covariates = ~age2, exacttimes=TRUE,
+#                opt.method = "nlm")
+```
+
+```{r}
+df_traj <- 
+    df_final %>% 
+    filter(povlevy1<pov_thresh) %>% 
+    arrange(dupersid,year,month) %>% 
+    mutate(cycle = (year - 2018) * 12 + month ) %>% 
+    select(dupersid,age,racev1x,cycle,type) %>% 
+    
+    # group_by(dupersid) %>%
+    # mutate(transition = as.integer(lead(type) != type & lead(type)!=4))  %>%
+    # mutate(transition = ifelse(is.na(transition),0,transition)) %>%
+    # mutate(first_transition = max(cycle*transition))  %>%
+    # ungroup() %>%
+    # filter(cycle > first_transition & first_transition>0)  %>%
+    
+    
+    na.omit() %>% 
+    as_tibble() %>% 
+    group_by(dupersid) %>% 
+    filter(n()>=3) %>% 
+    ungroup() %>% 
+    mutate(age2 = cut(age,breaks = params$age_categories)) %>% 
+    na.omit() %>% 
+    mutate(race = as.factor(racev1x)) %>% 
+    #mutate(type = factor(type,labels = params$v_names_states)) %>% 
+    # Sample EXCLUSION: Medicare -> Other Types of Insurance Not Allowed (only 2 cases)
+    group_by(dupersid) %>% 
+    mutate(nonelderly_medicare = max(type==4 & age <65)) %>% 
+    filter(nonelderly_medicare == 0) %>% 
+    mutate(next_type = lead(type)) %>% 
+    mutate(transition_to_medicare = as.integer(type==4 & lag(type)!=4)) %>% 
+    mutate(transition_to_medicare = ifelse(is.na(transition_to_medicare),0,transition_to_medicare) )  %>% 
+    filter(type!=4 | transition_to_medicare==1) %>% 
+    ungroup() %>% 
+    mutate(age10 = (age - mean(age))/10) %>% 
+    mutate(newly_65 = as.integer(age==65 & lag(age==64)))
+    
+P.init <- 
+    df_traj %>% 
+    mutate(next_type = lead(type)) %>% 
+    count(type,next_type) %>% 
+    na.omit() %>% 
+    spread(next_type,n) %>% 
+    data.frame() %>% 
+    column_to_rownames("type") %>% 
+    as.matrix()
+P.init[1,] = P.init[1,]/sum(P.init[,1])
+P.init[2,] = P.init[2,]/sum(P.init[,2])
+P.init[3,] = P.init[3,]/sum(P.init[,3])
+P.init[4,] = c(0,0,0,1)
+P.init[is.na(P.init)] = 0
+     
+Q.init = expm::logm(P.init)
+diag(Q.init) = 0
+Q.init[Q.init<0] = 0
+diag(Q.init) = -rowSums(Q.init)
+Q.init
+
+Q = crudeinits.msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q.init)
+# fit <- msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q, covariates = ~age2, exacttimes=TRUE)
+
+fit <- names(table(df_traj$age2)) %>% map(~({
+    msm(type ~ cycle, dupersid, data = df_traj %>% filter(age2==.x), qmatrix = Q, exacttimes=TRUE, covariates = ~age)
+})) %>% 
+    set_names(names(table(df_traj$age2)))
+```
+
+
+
+
+```{r}
+params1 <- with(params,modifyList(params,list(
+    m_R = 
+        ages %>% map(~({
+            
+            aa <- paste0(cut(.x,age_categories));aa
+            #Q_ = msm::qmatrix.msm(fit, ci = "none",covariates=list(age2=cut(.x, age_categories))) %>% as.matrix()
+            Q_ = msm::qmatrix.msm(fit_pre[[aa]], ci = "none", covariates = list(age = .x)) %>% as.matrix()
+            
+            diag(Q_) = 0
+            if (.x < 65) {
+                Q_[,4] = c(0,0,0,0)
+                diag(Q_) = 0
+
+            }  else if (.x >= 65) {
+                Q_[1,] = c(0,0,0,100)
+                Q_[2,] = c(0,0,0,100)
+                Q_[3,] = c(0,0,0,100)
+                Q_[4,] = c(0,0,0,0)
+            }   
+            diag(Q_) = -rowSums(Q_)  
+            Q_pre <- Q_ * 12
+            
+            
+            Q_ = msm::qmatrix.msm(fit[[aa]], ci = "none", covariates = list(age = .x)) %>% as.matrix()
+            
+            diag(Q_) = 0
+            if (.x < 65) {
+                Q_[,4] = c(0,0,0,0)
+                diag(Q_) = 0
+
+            }  else if (.x >= 65) {
+                Q_[1,] = c(0,0,0,100)
+                Q_[2,] = c(0,0,0,100)
+                Q_[3,] = c(0,0,0,100)
+                Q_[4,] = c(0,0,0,0)
+            }   
+            diag(Q_) = -rowSums(Q_)  
+            Q_ <- Q_ * 12
+            
+
+            array(c(as.vector(Q_pre),as.vector(Q_)), 
+              dim = c(length(v_tr_names)+ length(v_ab_names),length(v_tr_names)+ length(v_ab_names),length(v_tx_names)),
+          dimnames = list(c(v_tr_names,v_ab_names),c(v_tr_names,v_ab_names),v_tx_names)) %>% 
+            apply(.,3,function(x) x, simplify=FALSE) 
+        }))
+)))
+
+params3_ <- with(params1,modifyList(params1,list(
+    alpha = length(v_ab_names),
+    tau = length(v_tr_names), 
+    s = length(v_tr_names)*omega + length(v_ab_names) #total number of states;s=τω+α
+)))
+params3_ <- with(params3_,modifyList(params3_,list(
+  m_R_t = m_R %>% map(~({
+    tmp <- .x
+    tmp %>% map(~(t(.x)))
+  }))
+)))
+
+params3 <- with(params3_, modifyList(params3_, list(m_R_ = m_R_t %>% transpose())))
+params3$m_R = params3$m_R_
+
+params3 <- with(params3,modifyList(params3,list(
+    m_V = m_R %>% map(~({
+            R = .x
+            R %>% map(~({
+              m <- .x[v_tr_names,v_tr_names] 
+            }))
+            
+        })),
+     
+    m_Q = m_R %>% map(~({
+      R = .x 
+      R %>% map(~({
+                V = .x[v_tr_names,v_tr_names]
+                S = .x[v_ab_names,v_tr_names]
+                zero_ <- matrix(0, nrow = length(v_tr_names)+length(v_ab_names), ncol = length(v_ab_names))
+                tmp <- cbind(rbind(V,S),zero_)
+                dimnames(tmp) <- list(c(v_tr_names,v_ab_names),c(v_tr_names,v_ab_names))
+                tmp
+      }))
+    }))    
+)))
+
+params3 <- with(params3,modifyList(params3,list(
+    m_P3 = m_Q %>% map(~({
+          Q = .x
+          Q %>% map(~(expm(.x * Delta_t)))
+    }))
+)))
+params3$m_P = params3$m_P3
+```
+
+```{r}
+params3 <- with(params3,modifyList(params3,list(
+    m_U = m_P %>% map(~({
+          P <- .x 
+          P %>% map(~(.x[v_tr_names,v_tr_names]))
+    })),
+    m_M_ = m_P %>% map(~({
+        P = .x
+        P %>% map(~(as.matrix(.x[v_ab_names,v_tr_names])))
+        
+    }))
+)))
+# For models with one absorbing state
+params3 <- with(params3,modifyList(params3,list(
+    m_M = m_M_ %>% map(~({
+        M = .x
+        M %>% map(~(t(as.matrix(.x))))
+    }))
+)))
+
+params3 <- with(params3,modifyList(params3,list(
+    D = {
+        # Create diagonal age advancement matrix
+        D <- matrix(0, omega, omega)
+        vec <- rep(1, omega-1)
+        D[row(D)-1 == col(D)] <- vec
+        #D[omega,omega] = 1
+        D
+    }
+)))
+
+vec <-  # a simple function to return the vec of an array
+    function(x) {
+        y <- c(x)
+        return(y)
+    }
+
+vecperm <- 
+    # vecperm
+    # function to calculate the vec permutation matrix K of index m,n
+    # let X be a m x n matrix, and X' the transpose of X
+    # then K satisfies 
+    # vec(X') = K*vec(X)
+    function(m, n) {
+        K <- matrix(0, m * n, m * n)
+        a <- matrix(0, m, n)
+        
+        for (i in 1:m) {
+            for (j in 1:n) {
+                e <- a
+                e[i, j] <- 1
+                K <- K + kronecker(e, t(e))
+            }
+        }
+        return(K)
+    }
+
+```
+
+```{r}
+params3 <- with(params3,modifyList(params3,list(
+    bbD_ = kronecker(diag(tau), D),
+    bbU_ =  m_U %>% 
+            map(~(bdiag(.x))),
+    K = vecperm(tau, omega)
+)))
+
+params3 <- with(params3,modifyList(params3,list(
+    mUtilde = bbU_ %>% map( ~ ({
+        t(K) %*% bbD_ %*% K %*% .x
+    }))
+)))
+
+params3 <- with(params3,modifyList(params3,list(
+    mMtilde = m_M %>% map(~({
+      do.call(cbind,.x) 
+    }))  
+)))
+
+params3 <- with(params3,modifyList(params3,list(
+    mPtilde =  map2(mUtilde, mMtilde,  ~ ({
+            rbind(cbind(.x, matrix(0, tau * omega, alpha)) ,
+                  cbind(.y, diag(alpha)))
+        }))
+)))
+
+# Markov chain with rewards functions
+
+mcwr_occupancy <- function(params, H, V) {
+    with(params,{
+        map(v_tx_names,~({
+            U = mUtilde[[.x]]
+            P = mPtilde[[.x]]
+            v_ = V[[.x]]
+            N = solve(diag(tau*omega)-U)
+            h = vec(H) %>% as.matrix()
+            not_h = 1-h
+            v <- vec(v_) %>% as.matrix()
+            B1 <- h %*% t(v) + 0.5 * (not_h %*% t(v)) + 0.5 * (v %*% t(not_h)) # Eq. 46
+            C1 = 0.5 * (rep(1,alpha) %*%  t(v)) # Eq. 48
+            R1 = rbind(cbind(B1, matrix(0, tau * omega, alpha)) ,
+                              cbind(C1, diag(alpha))) 
+            R2 = R1 * R1
+            R3 = R1 * R1 * R1
+            Z = cbind(diag(tau*omega),matrix(0,nrow=tau*omega, ncol=alpha))
+            e = rep(1,s)
+            rho1_ <- t(N)%*% Z %*% t(P * R1) %*% e
+            rho1_
+        }))
+    })
+}
+
+mcwr_yll <- function(params, life_expectancy, disc) {
+    with(params,{
+        map2(mUtilde,mPtilde,~({
+            U = .x
+            P = .y
+            N = solve(diag(tau*omega)-U)
+            Z = cbind(diag(tau*omega),matrix(0,nrow=tau*omega, ncol=alpha))
+            disc_ = rev(sort(rep(disc,length(v_tr_names))))
+            eta1_ex_ = rev(sort(rep(life_expectancy,length(v_tr_names))))
+            eta1_ex =  eta1_ex_
+            
+            B1 = matrix(0,nrow=tau*omega, ncol = tau*omega)
+            C1 = rbind(matrix(0,nrow=1,ncol=tau*omega),eta1_ex*disc_) 
+            R1 = cbind(rbind(B1,C1),matrix(0,nrow=tau*omega+2,ncol=2))
+            R2 = R1 * R1
+            R3 = R1 * R1 * R1
+            Z = cbind(diag(tau*omega),matrix(0,nrow=tau*omega, ncol=alpha))
+            e = rep(1,s)
+            rho1_ = t(N) %*% Z %*% t(.y * R1) %*% e
+            rho1_
+        }))
+    })
+}
+
+
+```
+
+
+::: screen-page
+
+```{r}
+#| fig-height: 15
+#| 
+H = with(params3,matrix(1,nrow=tau, ncol=omega))
+
+with(params3,{
+  V_PRI <<- v_tx_names %>% map(~({
+    v_ <- matrix(0,nrow=tau, ncol = omega) 
+    v_[1,] <- 1 * Delta_t     
+    v_[2,] <- 0 * Delta_t 
+    v_[3,] <- 0 * Delta_t 
+    v_
+  })) %>% 
+    set_names(v_tx_names)
+})
+
+
+with(params3,{
+  V_PUB <<- v_tx_names %>% map(~({
+    v_ <- matrix(0,nrow=tau, ncol = omega) 
+    v_[1,] <- 0 * Delta_t     
+    v_[2,] <- 1 * Delta_t 
+    v_[3,] <- 0 * Delta_t 
+    v_
+  })) %>% 
+    set_names(v_tx_names)
+})
+
+with(params3,{
+  V_UNIN <<- v_tx_names %>% map(~({
+    v_ <- matrix(0,nrow=tau, ncol = omega) 
+    v_[1,] <- 0 * Delta_t     
+    v_[2,] <- 0 * Delta_t 
+    v_[3,] <- 1 * Delta_t 
+    v_
+  })) %>% 
+    set_names(v_tx_names)
+})
+
+
+PRI_ <- params3 %>% mcwr_occupancy(H = H, V = V_PRI)
+PUB_ <- params3 %>% mcwr_occupancy(H = H, V = V_PUB)
+UNIN_ <- params3 %>% mcwr_occupancy(H = H, V = V_UNIN)
+```
+
+
+```{r}
+library(directlabels)
+library(patchwork)
+
+p1 = PRI_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(1,0,0))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Private") + labs(x = "Age", y = "Private") + 
+    scale_y_continuous(limits = c(0,30))
+
+p2 = PUB_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(1,0,0))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Public") + labs(x = "Age", y = "Public") + 
+    scale_y_continuous(limits = c(0,30))
+
+p3 = UNIN_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(1,0,0))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Uninsured") + labs(x = "Age", y = "Uninsured") + 
+    scale_y_continuous(limits = c(0,30))
+
+
+
+p1_pub = PRI_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(0,1,0))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Private") + labs(x = "Age", y = "Private") + 
+    scale_y_continuous(limits = c(0,30))
+
+p2_pub = PUB_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(0,1,0))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Public") + labs(x = "Age", y = "Public") + 
+    scale_y_continuous(limits = c(0,30))
+
+p3_pub = UNIN_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(0,1,0))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Uninsured") + labs(x = "Age", y = "Uninsured") + 
+    scale_y_continuous(limits = c(0,30))
+
+
+p1_unin = PRI_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(0,0,1))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Private") + labs(x = "Age", y = "Private") + 
+    scale_y_continuous(limits = c(0,30))
+
+p2_unin = PUB_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(0,0,1))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Public") + labs(x = "Age", y = "Public") + 
+    scale_y_continuous(limits = c(0,30))
+
+p3_unin = UNIN_ %>% map(~({
+  as.data.frame(kronecker(diag(params3$omega),t(c(0,0,1))) %*% as.matrix(.x)) %>% 
+  mutate(age = params3$ages)  %>% 
+  mutate(initial = params3$tr_names[1])
+})) %>% 
+  set_names(params3$tx_names) %>% 
+  bind_rows(.id = "strategy") %>% 
+  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
+  scale_colour_aaas() + 
+  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
+    theme(legend.position = "none") + ggtitle("Uninsured") + labs(x = "Age", y = "Uninsured") + 
+    scale_y_continuous(limits = c(0,30))
+
+
+(p1 + p2 + p3) / (p1_pub + p2_pub + p3_pub) / (p1_unin + p2_unin + p3_unin)
+# attach(params3)
+# 
+# kronecker(t(c(1,rep(0,omega-1))),diag(tau)) %*% as.matrix(.x)
+# 
+# kronecker(diag(omega),t(c(0,0,0))) %*% as.matrix(.x)
+
+```
+:::
+
+```{r}
+
+```
+
