@@ -1,16 +1,17 @@
 ---
 title: Research_Insurance-Dynamics
-authors:
-  - name: Norah Jones
-    affiliation: The University
-    roles: writing
-    corresponding: true
 bibliography: references.bib
 editor_options: 
   chunk_output_type: console
 execute:
   cache: true  
 ---
+
+TK need to incorporate secular mortality
+
+[weighting in regression (see 2nd post)][https://www.statalist.org/forums/forum/general-stata-discussion/general/1420211-is-the-use-of-sampling-weights-in-regression-always-best-or-are-there-tradeoffs-that-need-to-be-considered]
+
+[length bias](https://journals.sagepub.com/doi/10.1177/0962280219832901)
 
 ```{r setup}
 library(tidyverse)
@@ -31,6 +32,8 @@ library(Hmisc)
 library(hrbrthemes)
 library(ggsci)
 library(janitor)
+library(directlabels)
+library(patchwork)
 #remotes::install_github("davidgohel/flextable")
 library(flextable)
 options(scipen = 5) 
@@ -163,6 +166,7 @@ prepare_multistate_data <- function(df, timevar, statevar, idvar) {
 # PUB{month}{year}{X}: COVR BY ANY PUBLIC INS 
 # TRI{month}{year}{X}: COVERED BY TRICARE/CHAMPVA
 # VAP{month}{year}{X}: COVERED BY VA
+
 meps_sas_import <-
     function( this_url ){
         
@@ -214,12 +218,11 @@ if (!file.exists(here("_data/meps/h236.rds"))) {
 #                "PRX","^PUB.*X$","^TRI.*X$","^VAP.*(Y1|Y2|Y3|Y4)$") %>% tolower()
 # final_types <- c("gva", "gvb", "gvc", "hpd", "hpe", "hpn", "hpo", "hpr", "hpx", "ihs", "ins", "mcd", "mcr", "pdk", "peg", "pne", "png", "poe", "pog", "pri", "prx", "pub", "tri", "vap")
 
-ins_types <- c("PRI","^INS.*X$","^MCR.*X$","^PUB.*X$") %>% tolower()
-final_types = c("pri","ins","mcr","pub")
+ins_types <- c("PRI","^INS.*X$","^MCR.*X$","^PUB.*X$","peg","poe","tri","vap","pne","png","pog","prx") %>% tolower()
+final_types = c("pri","ins","mcr","pub","peg","poe","tri","vap","pne","png","pog","prx")
 ```
 
 ```{r processins}
-
 df <- meps
 
 ins_cov <- 
@@ -277,19 +280,27 @@ tmp <- 2:length(ins_cov) %>% map(~({
 df_ins <- df_ins %>% mutate_at(vars(all_of(final_types)), function(x) ifelse(x==-1,NA,ifelse(x==2,0,ifelse(x==1,1,-99))))  %>% 
     mutate(unin = 1 - ins) %>% 
     mutate(type = case_when(
-        ins == 1 & mcr==1 ~ 4,
-        ins ==1 & pri == 1 ~ 1,
-        ins ==1 & pub == 1 ~ 2,
-        unin ==1 ~ 3,
+        # ins == 1 & mcr==1 ~ 4,
+        # ins ==1 & pri == 1 ~ 1,
+        # ins ==1 & pub == 1 ~ 2,
+        # unin ==1 ~ 3,
+        
+      
+        ins == 1 & mcr == 1 ~ 5,
+        ins == 1 & (peg == 1 | poe == 1 | tri == 1 | vap == 1) ~ 1,
+        ins == 1 & (pne == 1 | png == 1 | pog == 1 | pri == 1 | prx == 1) ~2,
+        ins ==1 & pub == 1 ~ 3,
+        unin ==1 ~ 4,          
         .default = NA
     )) 
+
     
-df_baseline <- 
+df_baseline <- df_baseline_post <- 
     df %>% 
     filter(age1x!=-1) %>% 
-    select(dupersid,dobmm,dobyy, starts_with("agey"),racev1x,racev2x,povlevy1) 
+    select(dupersid,dobmm,dobyy, starts_with("agey"),racev1x,racev2x,povlevy1,longwt) 
 
-df_final <-
+df_final <- df_final_post <- 
     df_baseline %>% 
     inner_join(df_ins,"dupersid") %>% 
     mutate(age = year - dobyy + -1 * as.integer(month<dobmm)) %>% 
@@ -302,7 +313,8 @@ df_final <-
 df <- meps2
 
 ins_cov <- 
-    ins_types %>% map(~({
+    ins_types[-which(ins_types %in% c("poe","vap","pne","prx"))] %>% map(~({
+        #cat(glue("{.x}"))
         df[,c("dupersid",grep(.x,colnames(df), value=TRUE))] %>% 
         select(dupersid,contains("y1"),contains("y2"),contains("y3"),contains("y4")) %>% 
         rename_all(function(x) gsub("y1",".2012",x)) %>% 
@@ -351,20 +363,23 @@ tmp <- 2:length(ins_cov) %>% map(~({
     df_ins <<- df_ins %>% left_join(ins_cov[[.x]],c("dupersid","month","year"))
 }))
 
-df_ins <- df_ins %>% mutate_at(vars(all_of(final_types)), function(x) ifelse(x==-1,NA,ifelse(x==2,0,ifelse(x==1,1,-99))))  %>% 
+final_types_ <- final_types[-which(final_types %in% c("poe","vap","pne","prx"))]
+
+df_ins <- df_ins %>% mutate_at(vars(all_of(final_types_)), function(x) ifelse(x==-1,NA,ifelse(x==2,0,ifelse(x==1,1,-99))))  %>%
     mutate(unin = 1 - ins) %>% 
     mutate(type = case_when(
-        ins == 1 & mcr==1 ~ 4,
-        ins ==1 & pri == 1 ~ 1,
-        ins ==1 & pub == 1 ~ 2,
-        unin ==1 ~ 3,
+        ins == 1 & mcr == 1 ~ 5,
+        ins == 1 & (peg == 1  | tri == 1 ) ~ 1,
+        ins == 1 & ( png == 1 | pog == 1 | pri == 1 ) ~ 2,
+        ins ==1 & pub == 1 ~ 3,
+        unin == 1 ~ 4, 
         .default = NA
     )) 
     
 df_baseline <- 
     df %>% 
     filter(age1x!=-1) %>% 
-    select(dupersid,dobmm,dobyy, starts_with("agey"),racev1x,racev2x, povlevy1) 
+    select(dupersid,dobmm,dobyy, starts_with("agey"),racev1x,racev2x, povlevy1, longwt) 
 
 df_final2 <-
     df_baseline %>% 
@@ -384,18 +399,17 @@ params_ <- list(
     v_tx_names = c("Post","Pre"),    # Treatment strategies 
     n_tx = 2,    
     
-    v_tr_names = c("Private","Public","Uninsured"),
+    v_tr_names = c("Emloyer","OthPrivate","Public","Uninsured"),
     v_ab_names = c("Medicare"),
-    n_states = 4,
+    n_states = 5,
     
-    horizon =  45,
+    horizon =  65,
     
     r_v_disc = 1e-6,
     Delta_t = 1,
-    age0 = 20,
+    age0 = 0,
     
-    age_categories = c(0,10,18,26,34,39,44,49,54,59,64,1000)
-   
+    age_categories = c(-1,10,18,26,34,39,44,49,54,59,64,1000)
 )
 params <- 
     with(params_,{
@@ -412,7 +426,6 @@ params <-
 
 params$ages_trace <- params$ages
 params$ages <- params$ages[-length(params$ages)] 
-
 ```
 
 ## Transition Intensities
@@ -428,22 +441,11 @@ p_{r s}(t-u, z(u))
 $$
 ```{r}
 pov_thresh = 200
-
-
 df_traj <- 
     df_final2 %>% 
-    filter(povlevy1<pov_thresh) %>% 
     arrange(dupersid,year,month) %>% 
     mutate(cycle = (year - 2012) * 12 + month ) %>% 
-    select(dupersid,age,racev1x,cycle,type) %>% 
-    
-    # group_by(dupersid) %>%
-    # mutate(transition = as.integer(lead(type) != type & lead(type)!=4))  %>%
-    # mutate(transition = ifelse(is.na(transition),0,transition)) %>%
-    # mutate(first_transition = max(cycle*transition))  %>%
-    # ungroup() %>%
-    # filter(cycle > first_transition & first_transition>0)  %>%
-
+    select(dupersid,age,racev1x,longwt,cycle,type) %>% 
     na.omit() %>% 
     as_tibble() %>% 
     group_by(dupersid) %>% 
@@ -451,19 +453,18 @@ df_traj <-
     ungroup() %>% 
     mutate(age2 = cut(age,breaks = params$age_categories)) %>% 
     na.omit() %>% 
-    mutate(race = as.factor(racev1x)) %>% 
-    #mutate(type = factor(type,labels = params$v_names_states)) %>% 
     # Sample EXCLUSION: Medicare -> Other Types of Insurance Not Allowed (only 2 cases)
     group_by(dupersid) %>% 
-    mutate(nonelderly_medicare = max(type==4 & age <65)) %>% 
+    mutate(nonelderly_medicare = max(type==5 & age <65)) %>% 
     filter(nonelderly_medicare == 0) %>% 
     mutate(next_type = lead(type)) %>% 
-    mutate(transition_to_medicare = as.integer(type==4 & lag(type)!=4)) %>% 
+    mutate(transition_to_medicare = as.integer(type==5 & lag(type)!=5)) %>% 
     mutate(transition_to_medicare = ifelse(is.na(transition_to_medicare),0,transition_to_medicare) )  %>% 
-    filter(type!=4 | transition_to_medicare==1) %>% 
+    filter(type!=5| transition_to_medicare==1) %>% 
     ungroup() %>% 
     mutate(age10 = (age - mean(age))/10) %>% 
-    mutate(newly_65 = as.integer(age==65 & lag(age==64)))
+    mutate(newly_65 = as.integer(age==65 & lag(age==64))) %>% 
+    mutate(longwt = scale(longwt))
 
 P.init <- 
     df_traj %>% 
@@ -477,43 +478,31 @@ P.init <-
 P.init[1,] = P.init[1,]/sum(P.init[,1])
 P.init[2,] = P.init[2,]/sum(P.init[,2])
 P.init[3,] = P.init[3,]/sum(P.init[,3])
-P.init[4,] = c(0,0,0,1)
+P.init[4,] = P.init[4,]/sum(P.init[,4])
+P.init[5,] = c(0,0,0,0,1)
 P.init[is.na(P.init)] = 0
      
 Q.init = expm::logm(P.init)
 diag(Q.init) = 0
 Q.init[Q.init<0] = 0
 diag(Q.init) = -rowSums(Q.init)
-Q.init
+
 
 Q = crudeinits.msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q.init)
 
 fit_pre <- names(table(df_traj$age2)) %>% map(~({
-    msm(type ~ cycle, dupersid, data = df_traj %>% filter(age2==.x), qmatrix = Q, exacttimes=TRUE, covariates = ~age)
+    msm(type ~ cycle, dupersid, data = df_traj %>% filter(age2==.x), qmatrix = Q, exacttimes=TRUE, covariates = ~age )
 })) %>% 
     set_names(names(table(df_traj$age2)))
 
-# 
-# fit_pre <- msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q, covariates = ~age2, exacttimes=TRUE,
-#                opt.method = "nlm")
 ```
 
 ```{r}
 df_traj <- 
     df_final %>% 
-    filter(povlevy1<pov_thresh) %>% 
     arrange(dupersid,year,month) %>% 
     mutate(cycle = (year - 2018) * 12 + month ) %>% 
-    select(dupersid,age,racev1x,cycle,type) %>% 
-    
-    # group_by(dupersid) %>%
-    # mutate(transition = as.integer(lead(type) != type & lead(type)!=4))  %>%
-    # mutate(transition = ifelse(is.na(transition),0,transition)) %>%
-    # mutate(first_transition = max(cycle*transition))  %>%
-    # ungroup() %>%
-    # filter(cycle > first_transition & first_transition>0)  %>%
-    
-    
+    select(dupersid,age,racev1x,cycle,type,longwt) %>% 
     na.omit() %>% 
     as_tibble() %>% 
     group_by(dupersid) %>% 
@@ -522,18 +511,18 @@ df_traj <-
     mutate(age2 = cut(age,breaks = params$age_categories)) %>% 
     na.omit() %>% 
     mutate(race = as.factor(racev1x)) %>% 
-    #mutate(type = factor(type,labels = params$v_names_states)) %>% 
     # Sample EXCLUSION: Medicare -> Other Types of Insurance Not Allowed (only 2 cases)
     group_by(dupersid) %>% 
-    mutate(nonelderly_medicare = max(type==4 & age <65)) %>% 
+    mutate(nonelderly_medicare = max(type==5 & age <65)) %>% 
     filter(nonelderly_medicare == 0) %>% 
     mutate(next_type = lead(type)) %>% 
-    mutate(transition_to_medicare = as.integer(type==4 & lag(type)!=4)) %>% 
+    mutate(transition_to_medicare = as.integer(type==5 & lag(type)!=5)) %>% 
     mutate(transition_to_medicare = ifelse(is.na(transition_to_medicare),0,transition_to_medicare) )  %>% 
-    filter(type!=4 | transition_to_medicare==1) %>% 
+    filter(type!=5 | transition_to_medicare==1) %>% 
     ungroup() %>% 
     mutate(age10 = (age - mean(age))/10) %>% 
-    mutate(newly_65 = as.integer(age==65 & lag(age==64)))
+    mutate(newly_65 = as.integer(age==65 & lag(age==64))) %>% 
+    mutate(longwt = scale(longwt))
     
 P.init <- 
     df_traj %>% 
@@ -547,25 +536,23 @@ P.init <-
 P.init[1,] = P.init[1,]/sum(P.init[,1])
 P.init[2,] = P.init[2,]/sum(P.init[,2])
 P.init[3,] = P.init[3,]/sum(P.init[,3])
-P.init[4,] = c(0,0,0,1)
+P.init[4,] = P.init[4,]/sum(P.init[,4])
+P.init[5,] = c(0,0,0,0,1)
 P.init[is.na(P.init)] = 0
      
 Q.init = expm::logm(P.init)
 diag(Q.init) = 0
 Q.init[Q.init<0] = 0
 diag(Q.init) = -rowSums(Q.init)
-Q.init
+
 
 Q = crudeinits.msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q.init)
-# fit <- msm(type ~ cycle, dupersid, data = df_traj, qmatrix = Q, covariates = ~age2, exacttimes=TRUE)
 
 fit <- names(table(df_traj$age2)) %>% map(~({
     msm(type ~ cycle, dupersid, data = df_traj %>% filter(age2==.x), qmatrix = Q, exacttimes=TRUE, covariates = ~age)
 })) %>% 
     set_names(names(table(df_traj$age2)))
 ```
-
-
 
 
 ```{r}
@@ -579,42 +566,114 @@ params1 <- with(params,modifyList(params,list(
             
             diag(Q_) = 0
             if (.x < 65) {
-                Q_[,4] = c(0,0,0,0)
+                #debug Q_ <- matrix(0,ncol=ncol(Q_),nrow=nrow(Q_))
+                Q_[,5] = c(0,0,0,0,0)
                 diag(Q_) = 0
 
             }  else if (.x >= 65) {
-                Q_[1,] = c(0,0,0,100)
-                Q_[2,] = c(0,0,0,100)
-                Q_[3,] = c(0,0,0,100)
-                Q_[4,] = c(0,0,0,0)
+                Q_[1,] = c(0,0,0,0,100)
+                Q_[2,] = c(0,0,0,0.100)
+                Q_[3,] = c(0,0,0,0,100)
+                Q_[4,] = c(0,0,0,0,100)
+                Q_[5,] = c(0,0,0,0,0)
             }   
             diag(Q_) = -rowSums(Q_)  
-            Q_pre <- Q_ * 12
+            Q_pre <- Q_ * 12 * Delta_t 
             
             
             Q_ = msm::qmatrix.msm(fit[[aa]], ci = "none", covariates = list(age = .x)) %>% as.matrix()
             
             diag(Q_) = 0
             if (.x < 65) {
-                Q_[,4] = c(0,0,0,0)
+                #debug Q_ <- matrix(0,ncol=ncol(Q_),nrow=nrow(Q_))
+                Q_[,5] = c(0,0,0,0,0)
                 diag(Q_) = 0
 
             }  else if (.x >= 65) {
-                Q_[1,] = c(0,0,0,100)
-                Q_[2,] = c(0,0,0,100)
-                Q_[3,] = c(0,0,0,100)
-                Q_[4,] = c(0,0,0,0)
-            }   
+                Q_[1,] = c(0,0,0,0,100)
+                Q_[2,] = c(0,0,0,0.100)
+                Q_[3,] = c(0,0,0,0,100)
+                Q_[4,] = c(0,0,0,0,100)
+                Q_[5,] = c(0,0,0,0,0)
+            }    
             diag(Q_) = -rowSums(Q_)  
-            Q_ <- Q_ * 12
+            Q_ <- Q_ * 12 * Delta_t 
             
-
-            array(c(as.vector(Q_pre),as.vector(Q_)), 
+         array(c(as.vector(Q_pre),as.vector(Q_)), 
               dim = c(length(v_tr_names)+ length(v_ab_names),length(v_tr_names)+ length(v_ab_names),length(v_tx_names)),
           dimnames = list(c(v_tr_names,v_ab_names),c(v_tr_names,v_ab_names),v_tx_names)) %>% 
             apply(.,3,function(x) x, simplify=FALSE) 
         }))
 )))
+
+```
+
+```{r trace}
+
+df_trace <- 
+    df_baseline_post %>% 
+    filter(dupersid %in% df_traj$dupersid) %>% 
+    left_join(df_final_post %>% arrange(year,month) %>% group_by(dupersid) %>% filter(row_number()==1) %>% select(dupersid,age,type0=type),"dupersid") %>% 
+    as_tibble()
+
+s0 <- df_trace %>% filter(age==0) %>% fastDummies::dummy_cols("type0") %>% summarise_at(vars(starts_with("type0_")),mean) %>% as.vector() %>% unlist()
+s0 <- c(s0,0)
+
+params_ <- with(params1,modifyList(params1,list(
+  m_R_t = m_R %>% map(~({
+    tmp <- .x
+    tmp %>% map(~(.x))
+  }))
+)))
+
+params_ <- with(params_, modifyList(params_, list(m_R_ = m_R_t %>% transpose())))
+params_$m_R = params_$m_R_
+
+params_ <- with(params_,modifyList(params_,list(
+  m_P = m_R %>% map(~({
+    tmp <- .x
+    tmp %>% map(~(expm(.x)))
+  }))
+)))
+
+trace1 <- 
+    with(params_, {
+        m_P %>% map( ~ ({
+            P = .x
+            occ <- s0
+            P %>% map(~({
+              occ <<- occ %*% .x
+            })) %>% 
+            map(~(data.frame(.x))) %>% 
+            bind_rows()
+        }))
+    })  
+library(zoo)
+
+df_trace %>% 
+    fastDummies::dummy_cols("type0") %>% 
+    filter(age<65) %>% 
+    #mutate_at(vars(starts_with("type0_")),function(x) rollmean(x,10,na.pad=T)) %>% 
+    group_by(age) %>% 
+    summarise_at(vars(starts_with("type0_")),~weighted.mean(.,w=longwt)) %>% 
+    set_names(c("age",params_$v_tr_names,"missing")) %>% 
+    select(-missing) %>% 
+    na.omit() %>% 
+    as_tibble() %>% 
+    gather(type,value,-age) %>% 
+    ggplot(aes(x = age, y = value, colour = type)) + geom_point(se=FALSE) + 
+    geom_line(
+        data = trace1$Pre %>% 
+                mutate(ages = params_$ages) %>% 
+                as_tibble() %>% 
+                select_at(vars(params$v_tr_names,ages)) %>% 
+                rename(age = ages) %>% 
+                gather(type,value,-age) , lty=1, size=1.25) +
+    hrbrthemes::theme_ipsum()
+
+```
+
+```{r}
 
 params3_ <- with(params1,modifyList(params1,list(
     alpha = length(v_ab_names),
@@ -801,32 +860,41 @@ mcwr_yll <- function(params, life_expectancy, disc) {
 
 ```
 
-
-::: screen-page
-
 ```{r}
-#| fig-height: 15
-#| 
+
 H = with(params3,matrix(1,nrow=tau, ncol=omega))
 
 with(params3,{
-  V_PRI <<- v_tx_names %>% map(~({
+  V_EMP <<- v_tx_names %>% map(~({
     v_ <- matrix(0,nrow=tau, ncol = omega) 
     v_[1,] <- 1 * Delta_t     
     v_[2,] <- 0 * Delta_t 
     v_[3,] <- 0 * Delta_t 
+    v_[4,] <- 0 * Delta_t 
     v_
   })) %>% 
     set_names(v_tx_names)
 })
 
+with(params3,{
+  V_NG <<- v_tx_names %>% map(~({
+    v_ <- matrix(0,nrow=tau, ncol = omega) 
+    v_[1,] <- 0 * Delta_t     
+    v_[2,] <- 1 * Delta_t 
+    v_[3,] <- 0 * Delta_t 
+    v_[4,] <- 0 * Delta_t 
+    v_
+  })) %>% 
+    set_names(v_tx_names)
+})
 
 with(params3,{
   V_PUB <<- v_tx_names %>% map(~({
     v_ <- matrix(0,nrow=tau, ncol = omega) 
     v_[1,] <- 0 * Delta_t     
-    v_[2,] <- 1 * Delta_t 
-    v_[3,] <- 0 * Delta_t 
+    v_[2,] <- 0 * Delta_t 
+    v_[3,] <- 1 * Delta_t 
+    v_[4,] <- 0 * Delta_t 
     v_
   })) %>% 
     set_names(v_tx_names)
@@ -837,153 +905,360 @@ with(params3,{
     v_ <- matrix(0,nrow=tau, ncol = omega) 
     v_[1,] <- 0 * Delta_t     
     v_[2,] <- 0 * Delta_t 
-    v_[3,] <- 1 * Delta_t 
+    v_[3,] <- 0 * Delta_t 
+    v_[4,] <- 1 * Delta_t 
     v_
   })) %>% 
     set_names(v_tx_names)
 })
 
 
-PRI_ <- params3 %>% mcwr_occupancy(H = H, V = V_PRI)
+EMP_ <- params3 %>% mcwr_occupancy(H = H, V = V_EMP)
+NG_ <- params3 %>% mcwr_occupancy(H = H, V = V_NG)
 PUB_ <- params3 %>% mcwr_occupancy(H = H, V = V_PUB)
 UNIN_ <- params3 %>% mcwr_occupancy(H = H, V = V_UNIN)
 ```
 
 
 ```{r}
-library(directlabels)
-library(patchwork)
+#| column: screen
+#| fig-height: 10
 
-p1 = PRI_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(1,0,0))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Private") + labs(x = "Age", y = "Private") + 
-    scale_y_continuous(limits = c(0,30))
-
-p2 = PUB_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(1,0,0))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Public") + labs(x = "Age", y = "Public") + 
-    scale_y_continuous(limits = c(0,30))
-
-p3 = UNIN_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(1,0,0))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Uninsured") + labs(x = "Age", y = "Uninsured") + 
-    scale_y_continuous(limits = c(0,30))
+df_res <- 
+    df_baseline_post %>% 
+    left_join(df_final_post %>% arrange(year,month) %>% group_by(dupersid) %>% filter(row_number()==1) %>% select(dupersid,age,type0=type),"dupersid") %>% 
+    as_tibble()
 
 
+# These numbers are going to tell us, for a 40 year old who starts in ESI [NG, PUB, UNIN], they will expect to spend x years in ESI before transitioning to Medicare. 
+res_unin <- params$ages %>% map_df(~({
+    aa = .x
+    e_ <- rep(0,length(params$ages))
+    e_[which(params$ages==aa)] = 1
 
-p1_pub = PRI_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(0,1,0))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Private") + labs(x = "Age", y = "Private") + 
-    scale_y_continuous(limits = c(0,30))
+    UNIN_ %>% map(~({
+    res <- kronecker(t(e_),diag(params$tau)) %*% .x
+    as.matrix(res) %>% as_tibble("res")
+    })) %>% 
+    cbind.data.frame() %>% 
+    set_names(c("Pre","Post") ) %>% 
+    mutate(change = Post - Pre) %>% 
+    mutate(ins_type = params$v_tr_names) %>% 
+    rename(unin_dur = Post, change_unin_dur = change) %>% 
+    mutate(type0 = 1:4) %>% 
+    mutate(age = aa) %>% 
+    select(age,type0,unin_dur, change_unin_dur)
+}))
 
-p2_pub = PUB_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(0,1,0))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Public") + labs(x = "Age", y = "Public") + 
-    scale_y_continuous(limits = c(0,30))
+res_pub <- params$ages %>% map_df(~({
+    aa = .x
+    e_ <- rep(0,length(params$ages))
+    e_[which(params$ages==aa)] = 1
 
-p3_pub = UNIN_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(0,1,0))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Uninsured") + labs(x = "Age", y = "Uninsured") + 
-    scale_y_continuous(limits = c(0,30))
-
-
-p1_unin = PRI_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(0,0,1))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Private") + labs(x = "Age", y = "Private") + 
-    scale_y_continuous(limits = c(0,30))
-
-p2_unin = PUB_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(0,0,1))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Public") + labs(x = "Age", y = "Public") + 
-    scale_y_continuous(limits = c(0,30))
-
-p3_unin = UNIN_ %>% map(~({
-  as.data.frame(kronecker(diag(params3$omega),t(c(0,0,1))) %*% as.matrix(.x)) %>% 
-  mutate(age = params3$ages)  %>% 
-  mutate(initial = params3$tr_names[1])
-})) %>% 
-  set_names(params3$tx_names) %>% 
-  bind_rows(.id = "strategy") %>% 
-  ggplot(aes(x = age, y = V1, colour = strategy, lty=strategy)) + geom_line() + theme_ipsum() + 
-  scale_colour_aaas() + 
-  geom_dl(method = list("first.points","bumpup", hjust=-1),aes(label = strategy)) +
-    theme(legend.position = "none") + ggtitle("Uninsured") + labs(x = "Age", y = "Uninsured") + 
-    scale_y_continuous(limits = c(0,30))
+    PUB_ %>% map(~({
+    res <- kronecker(t(e_),diag(params$tau)) %*% .x
+    as.matrix(res) %>% as_tibble("res")
+    })) %>% 
+    cbind.data.frame() %>% 
+    set_names(c("Pre","Post") ) %>% 
+    mutate(change = Post - Pre) %>% 
+    mutate(ins_type = params$v_tr_names) %>% 
+    rename(pub_dur = Post, change_pub_dur = change) %>% 
+    mutate(type0 = 1:4) %>% 
+    mutate(age = aa) %>% 
+    select(age,type0,pub_dur, change_pub_dur)
+}))
 
 
-(p1 + p2 + p3) / (p1_pub + p2_pub + p3_pub) / (p1_unin + p2_unin + p3_unin)
-# attach(params3)
-# 
-# kronecker(t(c(1,rep(0,omega-1))),diag(tau)) %*% as.matrix(.x)
-# 
-# kronecker(diag(omega),t(c(0,0,0))) %*% as.matrix(.x)
+res_esi <- params$ages %>% map_df(~({
+    aa = .x
+    e_ <- rep(0,length(params$ages))
+    e_[which(params$ages==aa)] = 1
+
+    EMP_ %>% map(~({
+    res <- kronecker(t(e_),diag(params$tau)) %*% .x
+    as.matrix(res) %>% as_tibble("res")
+    })) %>% 
+    cbind.data.frame() %>% 
+    set_names(c("Pre","Post") ) %>% 
+    mutate(change = Post - Pre) %>% 
+    mutate(ins_type = params$v_tr_names) %>% 
+    rename(esi_dur = Post, change_esi_dur = change) %>% 
+    mutate(type0 = 1:4) %>% 
+    mutate(age = aa) %>% 
+    select(age,type0,esi_dur, change_esi_dur)
+}))
+
+
+res_ng <- params$ages %>% map_df(~({
+    aa = .x
+    e_ <- rep(0,length(params$ages))
+    e_[which(params$ages==aa)] = 1
+
+    NG_ %>% map(~({
+    res <- kronecker(t(e_),diag(params$tau)) %*% .x
+    as.matrix(res) %>% as_tibble("res")
+    })) %>% 
+    cbind.data.frame() %>% 
+    set_names(c("Pre","Post") ) %>% 
+    mutate(change = Post - Pre) %>% 
+    mutate(ins_type = params$v_tr_names) %>% 
+    rename(ng_dur = Post, change_ng_dur = change) %>% 
+    mutate(type0 = 1:4) %>% 
+    mutate(age = aa) %>% 
+    select(age,type0,ng_dur, change_ng_dur)
+}))
+
+
+res_post <- df_res %>% 
+    inner_join(res_pub,c("type0","age")) %>% 
+        inner_join(res_unin,c("type0","age")) %>% 
+        inner_join(res_ng,c("type0","age")) %>% 
+        inner_join(res_esi,c("type0","age")) %>% 
+        group_by(age) %>% 
+    summarise(unin = mean(unin_dur,wt=longwt),pub = mean(pub_dur,wt=longwt),esi = mean(esi_dur,wt=longwt), ng = mean(ng_dur,wt=longwt)) %>% 
+    mutate(period = "post")
+
+res_pre <- df_res %>% 
+    inner_join(res_pub,c("type0","age")) %>% 
+        inner_join(res_unin,c("type0","age")) %>% 
+        inner_join(res_ng,c("type0","age")) %>% 
+        inner_join(res_esi,c("type0","age")) %>% 
+        group_by(age) %>% 
+    summarise(unin = mean(unin_dur - change_unin_dur,wt=longwt),pub = mean(pub_dur - change_pub_dur,wt=longwt),esi = mean(esi_dur - change_esi_dur,wt=longwt), ng = mean(ng_dur - change_ng_dur,wt=longwt)) %>% 
+    mutate(period = "pre")
+
+
+res_pre %>% 
+    bind_rows(res_post) %>% 
+    gather(type,value,-age,-period) %>% 
+    mutate(type = factor(type, levels = c("esi","ng","pub","unin"), labels = 
+                             c("Employer-Sponsored Insurance", "Non-Group Insurance" , "Public Insurance", "Uninsured")))  %>% 
+    ggplot(aes(x = age, y = value,  pch = period)) + geom_point(size=1) + 
+    hrbrthemes::theme_ipsum() + 
+    scale_shape_manual(values = c(3,2)) + 
+    facet_grid(type~., scales = "free") + geom_line(colour = "grey") + 
+    labs(x = "Age", y = "Expected Years")
 
 ```
-:::
+
+
+```{r}
+#| column: screen
+#| fig-height: 10
+
+res_change <- df_res %>% 
+    inner_join(res_pub,c("type0","age")) %>% 
+        inner_join(res_unin,c("type0","age")) %>% 
+        inner_join(res_ng,c("type0","age")) %>% 
+        inner_join(res_esi,c("type0","age")) %>% 
+        group_by(age) %>% 
+    summarise(unin = mean(change_unin_dur,wt=longwt),pub = mean(change_pub_dur,wt=longwt),esi = mean( change_esi_dur,wt=longwt), ng = mean(change_ng_dur,wt=longwt)) %>% 
+    mutate(period = "pre")
+
+res_change %>% 
+    gather(type,value,-age,-period) %>% 
+    mutate(type = factor(type, levels = c("esi","ng","pub","unin"), labels = 
+                             c("Employer-Sponsored Insurance", "Non-Group Insurance" , "Public Insurance", "Uninsured")))  %>% 
+    ggplot(aes(x = age, y = value)) + geom_point(size=1) + 
+    hrbrthemes::theme_ipsum() + 
+    scale_shape_manual(values = c(3,2)) + 
+    facet_grid(type~., scales = "free") + geom_line(colour = "grey") + 
+    labs(x = "Age", y = "Expected Years") + 
+    geom_hline(aes(yintercept = 0),lwd=1) 
+
+```
+
+```{r}
+decompose_occupancy <- function(params, age_groups = c(0,10,18,26,34,44,54,65)) {
+    levels(cut(params3$ages,age_groups)) %>% map_df(~({
+        aa = .x
+        
+        H_ = with(params,matrix(rep(as.integer(cut(ages,breaks = age_groups)==aa),params$tau), nrow=tau, ncol=omega, byrow= TRUE))
+        
+        with(params,{
+            V_EMP_ <<- v_tx_names %>% map(~({
+                v_ <- matrix(0,nrow=tau, ncol = omega) 
+                v_[1,] <- 1 * Delta_t     
+                v_[2,] <- 0 * Delta_t 
+                v_[3,] <- 0 * Delta_t 
+                v_[4,] <- 0 * Delta_t 
+                v_*H_
+            })) %>% 
+                set_names(v_tx_names)
+        })
+        
+        with(params,{
+            V_NG_ <<- v_tx_names %>% map(~({
+                v_ <- matrix(0,nrow=tau, ncol = omega) 
+                v_[1,] <- 0 * Delta_t     
+                v_[2,] <- 1 * Delta_t 
+                v_[3,] <- 0 * Delta_t 
+                v_[4,] <- 0 * Delta_t 
+                v_*H_
+            })) %>% 
+                set_names(v_tx_names)
+        })
+        
+        with(params,{
+            V_PUB_ <<- v_tx_names %>% map(~({
+                v_ <- matrix(0,nrow=tau, ncol = omega) 
+                v_[1,] <- 0 * Delta_t     
+                v_[2,] <- 0 * Delta_t 
+                v_[3,] <- 1 * Delta_t 
+                v_[4,] <- 0 * Delta_t 
+                v_*H_
+            })) %>% 
+                set_names(v_tx_names)
+        })
+        
+        with(params,{
+            V_UNIN_ <<- v_tx_names %>% map(~({
+                v_ <- matrix(0,nrow=tau, ncol = omega) 
+                v_[1,] <- 0 * Delta_t     
+                v_[2,] <- 0 * Delta_t 
+                v_[3,] <- 0 * Delta_t 
+                v_[4,] <- 1 * Delta_t 
+                v_*H_
+            })) %>% 
+                set_names(v_tx_names)
+        })
+        
+        EMP_ <- params %>% mcwr_occupancy(H = H_, V = V_EMP_)
+        NG_ <- params %>% mcwr_occupancy(H = H_, V = V_NG_)
+        PUB_ <- params %>% mcwr_occupancy(H = H_, V = V_PUB_)
+        UNIN_ <- params %>% mcwr_occupancy(H = H_, V = V_UNIN_)
+        
+        res_unin <- params$ages %>% map_df(~({
+            aa = .x
+            e_ <- rep(0,length(params$ages))
+            e_[which(params$ages==aa)] = 1
+            
+            UNIN_ %>% map(~({
+                res <- kronecker(t(e_),diag(params$tau)) %*% .x
+                as.matrix(res) %>% as_tibble("res")
+            })) %>% 
+                cbind.data.frame() %>% 
+                set_names(c("Pre","Post") ) %>% 
+                mutate(change = Post - Pre) %>% 
+                mutate(ins_type = params$v_tr_names) %>% 
+                rename(unin_dur = Post, change_unin_dur = change) %>% 
+                mutate(type0 = 1:4) %>% 
+                mutate(age = aa) %>% 
+                select(age,type0,unin_dur, change_unin_dur)
+        })) 
+        
+        res_pub <- params$ages %>% map_df(~({
+            aa = .x
+            e_ <- rep(0,length(params$ages))
+            e_[which(params$ages==aa)] = 1
+            
+            PUB_ %>% map(~({
+                res <- kronecker(t(e_),diag(params$tau)) %*% .x
+                as.matrix(res) %>% as_tibble("res")
+            })) %>% 
+                cbind.data.frame() %>% 
+                set_names(c("Pre","Post") ) %>% 
+                mutate(change = Post - Pre) %>% 
+                mutate(ins_type = params$v_tr_names) %>% 
+                rename(pub_dur = Post, change_pub_dur = change) %>% 
+                mutate(type0 = 1:4) %>% 
+                mutate(age = aa) %>% 
+                select(age,type0,pub_dur, change_pub_dur)
+        }))
+        
+        
+        res_esi <- params$ages %>% map_df(~({
+            aa = .x
+            e_ <- rep(0,length(params$ages))
+            e_[which(params$ages==aa)] = 1
+            
+            EMP_ %>% map(~({
+                res <- kronecker(t(e_),diag(params$tau)) %*% .x
+                as.matrix(res) %>% as_tibble("res")
+            })) %>% 
+                cbind.data.frame() %>% 
+                set_names(c("Pre","Post") ) %>% 
+                mutate(change = Post - Pre) %>% 
+                mutate(ins_type = params$v_tr_names) %>% 
+                rename(esi_dur = Post, change_esi_dur = change) %>% 
+                mutate(type0 = 1:4) %>% 
+                mutate(age = aa) %>% 
+                select(age,type0,esi_dur, change_esi_dur)
+        }))
+        
+        
+        res_ng <- params$ages %>% map_df(~({
+            aa = .x
+            e_ <- rep(0,length(params$ages))
+            e_[which(params$ages==aa)] = 1
+            
+            NG_ %>% map(~({
+                res <- kronecker(t(e_),diag(params$tau)) %*% .x
+                as.matrix(res) %>% as_tibble("res")
+            })) %>% 
+                cbind.data.frame() %>% 
+                set_names(c("Pre","Post") ) %>% 
+                mutate(change = Post - Pre) %>% 
+                mutate(ins_type = params$v_tr_names) %>% 
+                rename(ng_dur = Post, change_ng_dur = change) %>% 
+                mutate(type0 = 1:4) %>% 
+                mutate(age = aa) %>% 
+                select(age,type0,ng_dur, change_ng_dur)
+        }))
+        
+        df_res <- 
+            df_baseline_post %>% 
+            left_join(df_final_post %>% arrange(year,month) %>% group_by(dupersid) %>% filter(row_number()==1) %>% select(dupersid,age,type0=type),"dupersid") %>% 
+            as_tibble() %>% 
+            mutate(age_tmp = cut(age, breaks = age_groups))
+        
+        res_post <- df_res %>% 
+            inner_join(res_pub,c("type0","age")) %>% 
+            inner_join(res_unin,c("type0","age")) %>% 
+            inner_join(res_ng,c("type0","age")) %>% 
+            inner_join(res_esi,c("type0","age")) %>% 
+            group_by(age) %>% 
+            summarise(unin = mean(unin_dur,wt=longwt),pub = mean(pub_dur,wt=longwt),esi = mean(esi_dur,wt=longwt), ng = mean(ng_dur,wt=longwt)) %>% 
+            mutate(period = "post")
+        
+        res_pre <- df_res %>% 
+            inner_join(res_pub,c("type0","age")) %>% 
+            inner_join(res_unin,c("type0","age")) %>% 
+            inner_join(res_ng,c("type0","age")) %>% 
+            inner_join(res_esi,c("type0","age")) %>% 
+            group_by(age) %>% 
+            summarise(unin = mean(unin_dur - change_unin_dur,wt=longwt),pub = mean(pub_dur - change_pub_dur,wt=longwt),esi = mean(esi_dur - change_esi_dur,wt=longwt), ng = mean(ng_dur - change_ng_dur,wt=longwt)) %>% 
+            mutate(period = "pre")
+        
+        df_res %>% 
+            inner_join(res_pub,c("type0","age")) %>% 
+            inner_join(res_unin,c("type0","age")) %>% 
+            inner_join(res_ng,c("type0","age")) %>% 
+            inner_join(res_esi,c("type0","age")) %>% 
+            group_by(age) %>% 
+            summarise(unin = mean(change_unin_dur,wt=longwt),pub = mean(change_pub_dur,wt=longwt),esi = mean( change_esi_dur,wt=longwt), ng = mean(change_ng_dur,wt=longwt)) %>% 
+            mutate(period = "pre") %>% 
+            mutate(age_group = aa)
+    }))
+
+}
+
+res_decomp <- params3 %>% decompose_occupancy(seq(-1,65,5))
+res_decomp_tot <- params3 %>% decompose_occupancy(c(-1,100))
+options(scipen=999)
+
+aa = 0
+res_decomp %>% 
+    filter(age==aa) %>% 
+    mutate(cum_unin = cumsum(unin)) %>% 
+    bind_rows(res_decomp_tot %>% filter(age==aa) %>% mutate(age_group = "Total")) %>% 
+    mutate_at(vars(unin,pub,esi,ng),~round(.,2)) %>% 
+    mutate(cum_unin = round(cum_unin,2)) %>% 
+    select(age_group,esi,ng,pub,unin,cum_unin) %>% 
+    filter(esi!=0) %>% 
+    flextable()
+```
 
 ```{r}
 
