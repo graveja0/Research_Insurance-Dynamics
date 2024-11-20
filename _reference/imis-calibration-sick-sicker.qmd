@@ -1,0 +1,659 @@
+---
+title: "Calibration of Sick-Sicker"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+In this exercise, we will calibrate a model of a hypothetical Sick-Sicker disease. A Markov model of the Sick-Sicker disease has been implemented using four health states: Healthy (H); two disease states, Sick (S1) and Sicker (S2); and Dead (D). A state transition diagram is shown in Figure 1. All individuals start in the Healthy state (H). Over time, healthy individuals may develop the disease and can progress to S1. Individuals in S1 can recover (return to state H), progress further to S2 or die. Once in S2, individuals cannot recover (i.e. cannot transition back to either S1 or H). Individuals in H have a baseline probability of death, while individuals in S1 and S2 have an increased mortality rate compared to healthy individuals, modeled as a hazard ratio applied to the baseline mortality rate.
+
+Unfortunately, while we can identify those who are afflicted with the illness through obvious symptoms, we can’t easily distinguish those in the S1 state from the those in the S2 state. Thus, we can’t directly estimate state-specific mortality hazard ratios, nor do we know the transition probability of progressing from S1 to S2. We do have some idea of the plausible ranges for these unknown parameters; these ranges are listed in Table 1. All other model parameters are known and are also listed in Table 1.
+
+
+```{r setup}
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(MASS)
+library(expm)
+library(knitr)
+library(kableExtra)
+library(dampack)
+library(here)
+library(Hmisc)
+library(hrbrthemes)
+library(ggsci)
+library(janitor)
+library(flextable)
+library(here)
+library(lhs)
+
+# visualization
+library(plotrix)
+library(psych)
+library(scatterplot3d) # now that we have three inputs to estimate, we'll need higher dimension visualization
+
+options(scipen = 5) 
+transpose <- purrr::transpose
+select <- dplyr::select
+
+format_number <- function(x, k = 3, m = 0) {
+  ifelse(x == 0, 
+         "0.0", 
+         ifelse(x >= 1000, 
+                formatC(round(x, m), format = "f", big.mark = ",", digits = m),
+                formatC(round(x, k), format = "f", big.mark = ",", digits = k)))
+}
+
+gen_wcc <- 
+  # Please Note: This function is adapted from the dampack package. 
+  # https://github.com/feralaes/dampack
+  function (n_cycles, method = c("Simpson1/3", "half-cycle", "none")) 
+  {
+    if (n_cycles <= 0) {
+      stop("Number of cycles should be positive")
+    }
+    method <- match.arg(method)
+    n_cycles <- as.integer(n_cycles)
+    if (method == "Simpson1/3") {
+      v_cycles <- seq(1, n_cycles + 1)
+      v_wcc <- ((v_cycles%%2) == 0) * (2/3) + ((v_cycles%%2) != 
+                                                 0) * (4/3)
+      v_wcc[1] <- v_wcc[n_cycles + 1] <- 1/3
+    }
+    if (method == "half-cycle") {
+      v_wcc <- rep(1, n_cycles + 1)
+      v_wcc[1] <- v_wcc[n_cycles + 1] <- 0.5
+    }
+    if (method == "none") {
+      v_wcc <- rep(1, n_cycles + 1)
+    }
+    return(v_wcc)
+  }
+```
+
+
+# Calibration Targets
+
+```{r}
+#| warning: false
+#| message: false
+#| echo: false
+
+load(here("_reference/SickSicker_CalibTargets.RData"))
+lst_targets <- SickSicker_targets
+rm(list = c("SickSicker_targets"))
+```
+
+
+There are three calibration targets to be used in this example: 
+
+
+### 1. Observed survival of a cohort over time
+
+```{r}
+#| tbl-cap: Survival Targets
+#| echo: false 
+lst_targets$Surv %>% 
+    as_tibble() %>% 
+    head() %>% 
+    flextable(cwidth = 2) 
+```
+
+
+### 2. Disease prevalence in a cohort over time; 
+
+```{r}
+#| tbl-cap: Prevalance Targets
+#| echo: false 
+lst_targets$Prev %>% 
+    as_tibble() %>% 
+    head() %>% 
+    flextable(cwidth = 2) 
+```
+
+
+### 3. Among sick patients (S1+S2), the proportion who are in the S1 state at three points in time. 
+
+The first two targets came from an observational study of a typical cohort of individuals. The third target was obtained by subjecting ill patients to an invasive procedure which can determine disease stage but can’t be used routinely due to its invasiveness. 
+
+```{r}
+#| tbl-cap: Prevalance Targets
+#| echo: false 
+lst_targets$PropSick %>% 
+    as_tibble() %>% 
+    head() %>% 
+    flextable(cwidth = 2) 
+```
+
+
+```{r}
+params_ <- list(
+    
+    v_tx_names = c("SoC"),        # treatment names
+    n_tx = 2,                                  # number of treatment strategies
+    
+    cycle_correction = "half-cycle",    # Cycle correction method
+
+    v_tr_names = c("H","S1","S2"),             # transient health states
+    v_ab_names = c("DOC","DS"),                # absorbing health states
+    
+    n_states = 5,                              # total number of health states
+    
+    horizon = 30,                             # Model time horizon (years)
+    
+    r_v_disc_h  = 0.03,                        # annual discount rate (health)
+    r_v_disc_c = 0.03,                         # annual discount rate (costs)
+    
+    Delta_t = 1,                               # time step (1 = yearly)
+    
+    age0 = 25,                                 # age at baseline
+    
+    v_s0T = c(1,0,0,0,0),                      # initial state occupancy  
+    
+    r_HS1 = -log(1-0.15),                      # disease onset rate
+    r_S1H = -log(1-0.5),                       # recovery rate
+    r_S1S2 = -log(1-0.25),                     # disease progression rate
+    r_HD = -log(1-.005),                        # background mortality rate (p=0.03 in original; converting to rate)
+    
+    hr_S1 = 3.0,                               # hazard rate of disease-related death from S1 state
+    hr_S2 = 10.0,                               # hazard rate of disease-related death from S2 state
+    
+    u_H = 1,                                   # Healthy utility weight
+    u_S1 = 0.75,                               # Sick utility weight
+    u_S2 = 0.5,                                # Sicker utility weight
+    u_D = 0,                                   # Death utility weight
+    
+    c_H = 2000,                                # annual cost of healthy
+    c_S1 = 4000,                               # annual cost of S1
+    c_S2 = 15000,                              # annual cost of S2
+    c_D = 0,                                   # annual cost of death
+    
+    c_trtA = 12000,                            # cost of treatment A
+    u_trtA = 0.95,                             # utility weight for treatment A (S1 state)
+    
+    c_trtB = 13000,                            # cost of treatment B
+    hr_S1S2_trtB = 0.6                        # reduction in rate of disease progression 
+    
+)
+
+params <- 
+  with(params_,{
+    modifyList(params_,list(
+      v_names_states = c(v_tr_names, v_ab_names), # health state names
+      omega = horizon/Delta_t,  # Total number of cycles
+      r_disc_h_Delta_t = r_v_disc_h * Delta_t,  # Cycle discount rate: health outcomes
+      r_disc_c_Delta_t = r_v_disc_c * Delta_t,  # Cycle discount rate: cost outcomes
+      ages = (0:(horizon/Delta_t))*Delta_t + age0  # Age in each cycle
+    ))
+  })
+
+params$ages_trace <- params$ages
+params$ages <- params$ages[-length(params$ages)] 
+
+params <-
+  with(params, {
+    modifyList(params,
+               list(
+                 v_discC_h =  # Continuous time discounting: health outcomes
+                   exp(-r_disc_h_Delta_t  * 0:(omega)),
+                 v_discC_c =  # Continuous time discounting: cost outcomes
+                   exp(-r_disc_c_Delta_t  * 0:(omega)),
+                 v_discD_h =  # Discrete time discounting: health outcomes
+                   1 / ((1 + (params$r_disc_h_Delta_t)) ^ (0:omega)),
+                 v_discD_c =  # Discrete time discounting: cost outcomes
+                   1 / ((1 + (params$r_disc_c_Delta_t)) ^ (0:omega))
+               ))
+  })
+
+fn_p_HDOC <- function(age) {
+  r_HD <- get("r_HD", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-r_HD * Delta_t)
+}
+
+fn_p_HDS <- function(age) {
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(- 0 * Delta_t)
+}
+
+fn_p_S1DS <- function(age) {
+  r_HD <- get("r_HD", envir = parent.frame())
+  hr_S1 <- get("hr_S1", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-(hr_S1 * r_HD - r_HD) * Delta_t)
+}
+
+fn_p_S1DOC <- function(age) {
+  r_HD <- get("r_HD", envir = parent.frame())
+  hr_S1 <- get("hr_S1", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-(r_HD) * Delta_t)
+}
+
+fn_p_S2DS <- function(age) {
+  r_HD <- get("r_HD", envir = parent.frame())
+  hr_S2 <- get("hr_S2", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-(hr_S2 * r_HD - r_HD) * Delta_t)
+}
+
+fn_p_S2DOC <- function(age) {
+  r_HD <- get("r_HD", envir = parent.frame())
+  hr_S2 <- get("hr_S2", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-(r_HD) * Delta_t)
+}
+
+fn_p_HS1 <- function(age) {
+  r_HS1 <- get("r_HS1", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-r_HS1 * Delta_t)
+}
+
+fn_p_S1H <- function(age) {
+  r_S1H <- get("r_S1H", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-r_S1H * Delta_t)
+}
+
+fn_p_S1S2 <- function(age) {
+  r_S1S2 <- get("r_S1S2", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-r_S1S2 * Delta_t)
+}
+
+fn_p_S1S2_trtB <- function(age) {
+  r_S1S2 <- get("r_S1S2", envir = parent.frame())
+  hr_S1S2_trtB <- get("hr_S1S2_trtB", envir = parent.frame())
+  Delta_t <- get("Delta_t", envir = parent.frame())
+  1 - exp(-hr_S1S2_trtB * r_S1S2 * Delta_t)
+}
+
+#attach(params)
+```
+
+```{r}
+
+run_sick_sicker_markov <- function(params, calibration_params = NULL) {
+        
+    if (!is.null(calibration_params)) {
+        if (!is.list(calibration_params)) calibration_params = as.list(calibration_params)
+        params_tmp = with(params,modifyList(params,calibration_params))
+        } else params_tmp = params
+    
+    params_tmp <- with(params_tmp,modifyList(params_tmp,list(
+      
+      # Natural History Transition Rate Matrix
+      m_P = 
+        ages %>% map(~({
+          
+          mP_SoC = 
+            matrix(c(0,  # healthy -> healthy  (will be calculated later)
+                     fn_p_HS1(.x) ,  # healthy -> s1 
+                     0, # healthy -> S2
+                     fn_p_HDOC(.x) ,  # healthy -> DOC
+                     fn_p_HDS(.x)*(1-fn_p_S2DOC(.x)) , # healthy -> DS
+                     
+                     fn_p_S1H(.x) ,  # S1 -> healthy
+                     0, # S1 -> S1 (will be calculated later)
+                     fn_p_S1S2(.x) ,  # S1 -> S2
+                     fn_p_S1DOC(.x) , 
+                     fn_p_S1DS(.x)*(1-fn_p_S2DOC(.x)) , 
+                     
+                     0,  # S2 -> healthy
+                     0, # S2 -> S1
+                     0,  # S2 -> S2 (will be calculated later)
+                     fn_p_S2DOC(.x) , 
+                     fn_p_S2DS(.x)*(1-fn_p_S2DOC(.x)), 
+                     
+                     0, 0, 0, 0, 0,
+                     0, 0, 0, 0, 0
+            ),
+            nrow = n_states, 
+            ncol = n_states,
+            byrow=TRUE, 
+            dimnames = list(c(v_tr_names,v_ab_names),
+                            c(v_tr_names,v_ab_names)
+            ))
+    
+          # Balance matrix via diagonals to ensure probabilities sum to 1 across rows
+          diag(mP_SoC) = 1 - rowSums(mP_SoC)
+          
+          array(c(as.vector(mP_SoC)), dim = c(length(v_tr_names)+length(v_ab_names),length(v_tr_names)+length(v_ab_names),length(v_tx_names)),
+                dimnames = list(c(v_tr_names,v_ab_names),c(v_tr_names,v_ab_names),v_tx_names)) %>% 
+              apply(.,3,function(x) x, simplify=FALSE) 
+          
+        }))
+    )))
+    
+    # THIS CODE FLIPS THE LIST OBJECT ABOVE INSIDE OUT, SO THAT IT IS LISTED
+    # BY STRATEGY-CYCLE RATHER THAN CYCLE-STRATEGY. 
+    params_tmp$m_P <- transpose(params_tmp$m_P)
+    
+    
+    ## WE NOW ADD ON A CYCLE=0 TRANSITION PROBABILITY MATRIX WHERE
+    ## EVERYONE STAYS IN THE SAME HEALTH STATE. 
+    
+    params_tmp <- with(params_tmp,modifyList(params_tmp,list(
+      m_P_ = m_P %>% map(~({
+        tmp <- .x
+        init <- diag(nrow=nrow(tmp[[1]]),ncol=ncol(tmp[[1]]))
+        dimnames(init) = dimnames(tmp[[1]])
+        append(.x,list(init),after=0)
+      }))
+    )))
+    params_tmp$m_P = params_tmp$m_P_
+    params_tmp[["m_P_"]] <- NULL
+    
+    trace_ref <- 
+      with(params_tmp, {
+        m_P %>% map( ~ ({
+          P = .x
+          occ <- v_s0T
+          P %>% map(~({
+            occ <<- occ %*% .x
+          })) %>% 
+            map(~(data.frame(.x))) %>% 
+            bind_rows()
+        }))
+      }) 
+    
+    trace_ref %>% map(~({
+        Surv = (1-rowSums(.x[,params_tmp$v_ab_names]))
+        Prev = (rowSums(.x[,c("S1","S2")])/Surv)
+        PropSick = .x[, "S1"] / Prev
+        list( Surv = Surv[-1],
+             Prev = Prev[-1],
+             PropSick = PropSick[c(11,21,31)])
+    })) %>% 
+        pluck(1) 
+
+}
+
+```
+
+```{r}
+
+set.seed(072218)
+
+# number of initial starting points
+n_init <- 100
+
+# names and number of input parameters to be calibrated
+v_param_names <- c("p_S1S2","hr_S1","hr_S2")
+n_param <- length(v_param_names)
+
+# range on input search space
+lb <- c(p_S1S2 = 0.01, hr_S1 = 1, hr_S2 = 5) # lower bound
+ub <- c(p_S1S2 = 0.5, hr_S1 = 4.5, hr_S2=15) # upper bound
+
+# number of calibration targets
+v_target_names <- c("Surv","Prev","PropSick")
+n_target <- length(v_target_names)
+
+### Calibration functions
+
+# Write goodness-of-fit function to pass to Nelder-Mead algorithm
+f_gof <- function(v_params){
+  
+  if(!is.list(v_params)) v_params = as.list(v_params)
+  v_params <- modifyList(v_params,list(r_S1S2 = -log(1-v_params$p_S1S2)))
+  
+  # Run model for parametr set "v_params"
+  model_res <- run_sick_sicker_markov(params, v_params)
+  
+  # Calculate goodness-of-fit of model outputs to targets
+  v_GOF <- numeric(n_target)
+  # TARGET 1: Survival ("Surv")
+  # log likelihood  
+  v_GOF[1] <- sum(dnorm(x = lst_targets$Surv$value,
+                        mean = model_res$Surv,
+                        sd = lst_targets$Surv$se,
+                        log = T))
+  
+  # TARGET 2: (if you had more...)
+  # log likelihood
+  v_GOF[2] <- sum(dnorm(x = lst_targets$Prev$value,
+                         mean = model_res$Prev,
+                         sd = lst_targets$Prev$se,
+                         log = T))
+  
+  v_GOF[3] <- sum(dnorm(x = lst_targets$PropSick$value,
+                        mean = model_res$PropSick,
+                        sd = lst_targets$PropSick$se,
+                        log = T))
+  
+  # OVERALL
+  # can give different targets different weights
+  v_weights <- rep(1,n_target)
+  # weighted sum
+  GOF_overall <- sum(v_GOF[1:n_target] * v_weights)
+  
+  # return GOF
+  return(GOF_overall)
+}
+
+####################################################################
+######  Calibrate!  ######
+####################################################################
+# record start time of calibration
+t_init <- Sys.time()
+
+###  Sample multiple random starting values for Nelder-Mead  ###
+v_params_init <- matrix(nrow=n_init,ncol=n_param)
+for (i in 1:n_param){
+  v_params_init[,i] <- runif(n_init,min=lb[i],max=ub[i])
+}
+colnames(v_params_init) <- v_param_names
+
+###  Run Nelder-Mead for each starting point  ###
+m_calib_res <- matrix(nrow = n_init, ncol = n_param+1)
+colnames(m_calib_res) <- c(v_param_names, "Overall_fit")
+for (j in 1:n_init){
+  cat(j)
+  ### use optim() as Nelder-Mead ###
+  # fit_nm <- optim(v_params_init[j,], f_gof,
+  #                 control = list(fnscale = -1, # switches from minimization to maximization
+  #                                maxit = 1000), hessian = T)
+  # m_calib_res[j,] <- c(fit_nm$par,fit_nm$value)
+  cat("\n")
+  ### to use a simulated annealing instead ###
+  fit_sa <- optim(v_params_init[j,], f_gof,
+                 method = c("SANN"),  # switches to using simulated annealing
+                 control = list(temp = 10, tmax = 10, # algorithm tuning parameters
+                                fnscale = -1, maxit = 1000),
+                 hessian = T)
+  m_calib_res[j,] = c(fit_sa$par,fit_sa$value)
+  
+  ### to use a genetic algorithm instead ###
+  # library(DEoptim)
+  # f_fitness <- function(params){
+  #   names(params) = v_param_names
+  #   return(-f_gof(params))}
+  # fit_ga = DEoptim(f_fitness, lower=lb, upper=ub)
+  # m_calib_res[j,] = c(fit_ga$optim$bestmem,-1*fit_ga$optim$bestval)
+  
+}
+
+# Calculate computation time
+comp_time <- Sys.time() - t_init
+
+
+####################################################################
+######  Exploring best-fitting input sets  ######
+####################################################################
+
+# Arrange parameter sets in order of fit
+m_calib_res <- m_calib_res[order(-m_calib_res[,"Overall_fit"]),]
+
+# Examine the top 10 best-fitting sets
+m_calib_res[1:10,]
+
+m_calib_res[1,]
+
+
+run_sick_sicker_markov(params, list(r_S1S2=-log(1-m_calib_res[1,1]), hr_S1 = m_calib_res[1,2], hr_s2 = m_calib_res[1,3]))
+
+# Plot the top 10 (top 10%)
+scatterplot3d(m_calib_res[1:10,1],m_calib_res[1:10,2],z = m_calib_res[1:10,3],
+     xlim=c(lb[1],ub[1]),ylim=c(lb[2],ub[2]),zlim = c(lb[3],ub[3]),
+     xlab = colnames(m_calib_res)[1],ylab = colnames(m_calib_res)[2],zlab = colnames(m_calib_res)[3])
+
+# Pairwise comparison of top 10 sets
+pairs.panels(m_calib_res[1:10,v_param_names])
+
+
+### Plot model-predicted output at mean vs targets ###
+m_calib_res_rates <- m_calib_res
+m_calib_res_rates[,1] = -log(1-m_calib_res_rates[,1])
+v_out_best <- run_sick_sicker_markov(params, list(r_S1S2=-log(1-m_calib_res[1,1]), hr_S1 = m_calib_res[1,2], hr_s2 = m_calib_res[1,3]))
+
+
+# TARGET 1: Survival ("Surv")
+plotrix::plotCI(x = lst_targets$Surv$time, y = lst_targets$Surv$value, 
+                ui = lst_targets$Surv$ub,
+                li = lst_targets$Surv$lb,
+                ylim = c(0, 1), 
+                xlab = "Time", ylab = "Pr Survive")
+points(x = lst_targets$Surv$time, 
+       y = v_out_best$Surv, 
+       pch = 8, col = "red")
+legend("topright", 
+       legend = c("Target", "Model-predicted output"),
+       col = c("black", "red"), pch = c(1, 8))
+
+
+# Note: When visualizing the top 100 (top 10%) input sets, use scatterplot3d() instead of plot().
+
+```
+
+
+```{r}
+source(here::here("_reference/SickSicker_MarkovModel_Function.R"))
+
+# Write goodness-of-fit function to pass to Nelder-Mead algorithm
+f_gof2 <- function(v_params){
+  
+  # Run model for parametr set "v_params"
+  model_res <- run_sick_sicker_markov2(v_params)
+  
+  # Calculate goodness-of-fit of model outputs to targets
+  v_GOF <- numeric(n_target)
+  # TARGET 1: Survival ("Surv")
+  # log likelihood  
+  v_GOF[1] <- sum(dnorm(x = lst_targets$Surv$value,
+                        mean = model_res$Surv,
+                        sd = lst_targets$Surv$se,
+                        log = T))
+  
+  # TARGET 2: (if you had more...)
+  # log likelihood
+  v_GOF[2] <- sum(dnorm(x = lst_targets$Prev$value,
+                         mean = model_res$Prev,
+                         sd = lst_targets$Prev$se,
+                         log = T))
+  
+  v_GOF[3] <- sum(dnorm(x = lst_targets$PropSick$value,
+                        mean = model_res$PropSick,
+                        sd = lst_targets$PropSick$se,
+                        log = T))
+  
+  # OVERALL
+  # can give different targets different weights
+  v_weights <- rep(1,n_target)
+  # weighted sum
+  GOF_overall <- sum(v_GOF[1:n_target] * v_weights)
+  
+  # return GOF
+  return(GOF_overall)
+}
+
+
+####################################################################
+######  Calibrate!  ######
+####################################################################
+# record start time of calibration
+t_init <- Sys.time()
+
+###  Sample multiple random starting values for Nelder-Mead  ###
+v_params_init <- matrix(nrow=n_init,ncol=n_param)
+for (i in 1:n_param){
+  v_params_init[,i] <- runif(n_init,min=lb[i],max=ub[i])
+}
+colnames(v_params_init) <- v_param_names
+
+###  Run Nelder-Mead for each starting point  ###
+m_calib_res2 <- matrix(nrow = n_init, ncol = n_param+1)
+colnames(m_calib_res2) <- c(v_param_names, "Overall_fit")
+for (j in 1:n_init){
+  cat(j)
+  ### use optim() as Nelder-Mead ###
+  fit_nm <- optim(v_params_init[j,], f_gof2,
+                  control = list(fnscale = -1, # switches from minimization to maximization
+                                 maxit = 1000), hessian = T)
+  m_calib_res2[j,] <- c(fit_nm$par,fit_nm$value)
+  cat("\n")
+  ### to use a simulated annealing instead ###
+  # fit_sa <- optim(v_params_init[j,], f_gof,
+  #                method = c("SANN"),  # switches to using simulated annealing
+  #                control = list(temp = 10, tmax = 10, # algorithm tuning parameters
+  #                               fnscale = -1, maxit = 1000),
+  #                hessian = T)
+  # m_calib_res[j,] = c(fit_sa$par,fit_sa$value)
+  
+  ### to use a genetic algorithm instead ###
+  # library(DEoptim)
+  # f_fitness <- function(params){
+  #   names(params) = v_param_names
+  #   return(-f_gof(params))}
+  # fit_ga = DEoptim(f_fitness, lower=lb, upper=ub)
+  # m_calib_res[j,] = c(fit_ga$optim$bestmem,-1*fit_ga$optim$bestval)
+  
+}
+
+# Calculate computation time
+comp_time <- Sys.time() - t_init
+
+
+####################################################################
+######  Exploring best-fitting input sets  ######
+####################################################################
+
+# Arrange parameter sets in order of fit
+m_calib_res <- m_calib_res[order(-m_calib_res[,"Overall_fit"]),]
+
+# Examine the top 10 best-fitting sets
+m_calib_res[1:10,]
+
+# Plot the top 10 (top 10%)
+scatterplot3d(m_calib_res[1:10,1],m_calib_res[1:10,2],z = m_calib_res[1:10,3],
+     xlim=c(lb[1],ub[1]),ylim=c(lb[2],ub[2]),zlim = c(lb[3],ub[3]),
+     xlab = colnames(m_calib_res)[1],ylab = colnames(m_calib_res)[2],zlab = colnames(m_calib_res)[3])
+
+# Pairwise comparison of top 10 sets
+pairs.panels(m_calib_res[1:10,v_param_names])
+
+
+### Plot model-predicted output at mean vs targets ###
+v_out_best2 <- run_sick_sicker_markov2(m_calib_res2[1,])
+
+# TARGET 1: Survival ("Surv")
+plotrix::plotCI(x = lst_targets$Surv$time, y = lst_targets$Surv$value, 
+                ui = lst_targets$Surv$ub,
+                li = lst_targets$Surv$lb,
+                ylim = c(0, 1), 
+                xlab = "Time", ylab = "Pr Survive")
+points(x = lst_targets$Surv$time, 
+       y = v_out_best2$Surv, 
+       pch = 8, col = "red")
+legend("topright", 
+       legend = c("Target", "Model-predicted output"),
+       col = c("black", "red"), pch = c(1, 8))
+
+
+# Note: When visualizing the top 100 (top 10%) input sets, use scatterplot3d() instead of plot().
+
+```
+
