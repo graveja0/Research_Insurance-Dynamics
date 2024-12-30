@@ -54,7 +54,27 @@ div.sourceCode
 @media screen {
 pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
 }
-</style>
+/* CSS for citations */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+  margin-bottom: 0em;
+}
+.hanging-indent div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}</style>
 
 
 <script src="imis-calibration-sick-sicker_files/libs/clipboard/clipboard.min.js"></script>
@@ -67,6 +87,9 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <script src="imis-calibration-sick-sicker_files/libs/bootstrap/bootstrap.min.js"></script>
 <link href="imis-calibration-sick-sicker_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
 <link href="imis-calibration-sick-sicker_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
+<script src="imis-calibration-sick-sicker_files/libs/quarto-contrib/glightbox/glightbox.min.js"></script>
+<link href="imis-calibration-sick-sicker_files/libs/quarto-contrib/glightbox/glightbox.min.css" rel="stylesheet">
+<link href="imis-calibration-sick-sicker_files/libs/quarto-contrib/glightbox/lightbox.css" rel="stylesheet">
 <link href="imis-calibration-sick-sicker_files/libs/tabwid-1.1.3/tabwid.css" rel="stylesheet">
 <script src="imis-calibration-sick-sicker_files/libs/tabwid-1.1.3/tabwid.js"></script>
 
@@ -100,6 +123,14 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 
 <p>In this exercise, we will calibrate a model of a hypothetical Sick-Sicker disease. A Markov model of the Sick-Sicker disease has been implemented using four health states: Healthy (H); two disease states, Sick (S1) and Sicker (S2); and Dead (D). A state transition diagram is shown in Figure 1. All individuals start in the Healthy state (H). Over time, healthy individuals may develop the disease and can progress to S1. Individuals in S1 can recover (return to state H), progress further to S2 or die. Once in S2, individuals cannot recover (i.e.&nbsp;cannot transition back to either S1 or H). Individuals in H have a baseline probability of death, while individuals in S1 and S2 have an increased mortality rate compared to healthy individuals, modeled as a hazard ratio applied to the baseline mortality rate.</p>
 <p>Unfortunately, while we can identify those who are afflicted with the illness through obvious symptoms, we can’t easily distinguish those in the S1 state from the those in the S2 state. Thus, we can’t directly estimate state-specific mortality hazard ratios, nor do we know the transition probability of progressing from S1 to S2. We do have some idea of the plausible ranges for these unknown parameters; these ranges are listed in Table 1. All other model parameters are known and are also listed in Table 1.</p>
+<section id="basic-calibration-process" class="level1">
+<h1>Basic Calibration Process</h1>
+<ol type="1">
+<li>Load calibration targets.</li>
+<li>Create a function that outputs the calibration targets.</li>
+<li>Create a grid of initial guesses, and work over it.</li>
+<li>Select the parameter combination that maximizes likelihood.</li>
+</ol>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb1"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(tidyverse)</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(MASS)</span>
@@ -114,148 +145,804 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(janitor)</span>
 <span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(flextable)</span>
 <span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(here)</span>
-<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="fu">options</span>(<span class="at">scipen =</span> <span class="dv">5</span>) </span>
-<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>transpose <span class="ot">&lt;-</span> purrr<span class="sc">::</span>transpose</span>
-<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>select <span class="ot">&lt;-</span> dplyr<span class="sc">::</span>select</span>
-<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>format_number <span class="ot">&lt;-</span> <span class="cf">function</span>(x, <span class="at">k =</span> <span class="dv">3</span>, <span class="at">m =</span> <span class="dv">0</span>) {</span>
-<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ifelse</span>(x <span class="sc">==</span> <span class="dv">0</span>, </span>
-<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a>         <span class="st">"0.0"</span>, </span>
-<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a>         <span class="fu">ifelse</span>(x <span class="sc">&gt;=</span> <span class="dv">1000</span>, </span>
-<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a>                <span class="fu">formatC</span>(<span class="fu">round</span>(x, m), <span class="at">format =</span> <span class="st">"f"</span>, <span class="at">big.mark =</span> <span class="st">","</span>, <span class="at">digits =</span> m),</span>
-<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a>                <span class="fu">formatC</span>(<span class="fu">round</span>(x, k), <span class="at">format =</span> <span class="st">"f"</span>, <span class="at">big.mark =</span> <span class="st">","</span>, <span class="at">digits =</span> k)))</span>
-<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a>}</span>
-<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>gen_wcc <span class="ot">&lt;-</span> </span>
-<span id="cb1-27"><a href="#cb1-27" aria-hidden="true" tabindex="-1"></a>  <span class="co"># Please Note: This function is adapted from the dampack package. </span></span>
-<span id="cb1-28"><a href="#cb1-28" aria-hidden="true" tabindex="-1"></a>  <span class="co"># https://github.com/feralaes/dampack</span></span>
-<span id="cb1-29"><a href="#cb1-29" aria-hidden="true" tabindex="-1"></a>  <span class="cf">function</span> (n_cycles, <span class="at">method =</span> <span class="fu">c</span>(<span class="st">"Simpson1/3"</span>, <span class="st">"half-cycle"</span>, <span class="st">"none"</span>)) </span>
-<span id="cb1-30"><a href="#cb1-30" aria-hidden="true" tabindex="-1"></a>  {</span>
-<span id="cb1-31"><a href="#cb1-31" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (n_cycles <span class="sc">&lt;=</span> <span class="dv">0</span>) {</span>
-<span id="cb1-32"><a href="#cb1-32" aria-hidden="true" tabindex="-1"></a>      <span class="fu">stop</span>(<span class="st">"Number of cycles should be positive"</span>)</span>
-<span id="cb1-33"><a href="#cb1-33" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-34"><a href="#cb1-34" aria-hidden="true" tabindex="-1"></a>    method <span class="ot">&lt;-</span> <span class="fu">match.arg</span>(method)</span>
-<span id="cb1-35"><a href="#cb1-35" aria-hidden="true" tabindex="-1"></a>    n_cycles <span class="ot">&lt;-</span> <span class="fu">as.integer</span>(n_cycles)</span>
-<span id="cb1-36"><a href="#cb1-36" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (method <span class="sc">==</span> <span class="st">"Simpson1/3"</span>) {</span>
-<span id="cb1-37"><a href="#cb1-37" aria-hidden="true" tabindex="-1"></a>      v_cycles <span class="ot">&lt;-</span> <span class="fu">seq</span>(<span class="dv">1</span>, n_cycles <span class="sc">+</span> <span class="dv">1</span>)</span>
-<span id="cb1-38"><a href="#cb1-38" aria-hidden="true" tabindex="-1"></a>      v_wcc <span class="ot">&lt;-</span> ((v_cycles<span class="sc">%%</span><span class="dv">2</span>) <span class="sc">==</span> <span class="dv">0</span>) <span class="sc">*</span> (<span class="dv">2</span><span class="sc">/</span><span class="dv">3</span>) <span class="sc">+</span> ((v_cycles<span class="sc">%%</span><span class="dv">2</span>) <span class="sc">!=</span> </span>
-<span id="cb1-39"><a href="#cb1-39" aria-hidden="true" tabindex="-1"></a>                                                 <span class="dv">0</span>) <span class="sc">*</span> (<span class="dv">4</span><span class="sc">/</span><span class="dv">3</span>)</span>
-<span id="cb1-40"><a href="#cb1-40" aria-hidden="true" tabindex="-1"></a>      v_wcc[<span class="dv">1</span>] <span class="ot">&lt;-</span> v_wcc[n_cycles <span class="sc">+</span> <span class="dv">1</span>] <span class="ot">&lt;-</span> <span class="dv">1</span><span class="sc">/</span><span class="dv">3</span></span>
-<span id="cb1-41"><a href="#cb1-41" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-42"><a href="#cb1-42" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (method <span class="sc">==</span> <span class="st">"half-cycle"</span>) {</span>
-<span id="cb1-43"><a href="#cb1-43" aria-hidden="true" tabindex="-1"></a>      v_wcc <span class="ot">&lt;-</span> <span class="fu">rep</span>(<span class="dv">1</span>, n_cycles <span class="sc">+</span> <span class="dv">1</span>)</span>
-<span id="cb1-44"><a href="#cb1-44" aria-hidden="true" tabindex="-1"></a>      v_wcc[<span class="dv">1</span>] <span class="ot">&lt;-</span> v_wcc[n_cycles <span class="sc">+</span> <span class="dv">1</span>] <span class="ot">&lt;-</span> <span class="fl">0.5</span></span>
-<span id="cb1-45"><a href="#cb1-45" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-46"><a href="#cb1-46" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (method <span class="sc">==</span> <span class="st">"none"</span>) {</span>
-<span id="cb1-47"><a href="#cb1-47" aria-hidden="true" tabindex="-1"></a>      v_wcc <span class="ot">&lt;-</span> <span class="fu">rep</span>(<span class="dv">1</span>, n_cycles <span class="sc">+</span> <span class="dv">1</span>)</span>
-<span id="cb1-48"><a href="#cb1-48" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb1-49"><a href="#cb1-49" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span>(v_wcc)</span>
-<span id="cb1-50"><a href="#cb1-50" aria-hidden="true" tabindex="-1"></a>  }</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(lhs)</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(DEoptim)</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a><span class="co"># package_url &lt;- "https://cran.r-project.org/src/contrib/Archive/IMIS/IMIS_0.1.tar.gz"</span></span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a><span class="co"># install.packages(package_url, repos = NULL, type = "source")</span></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(IMIS)</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(plotrix)</span>
+<span id="cb1-20"><a href="#cb1-20" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(psych)</span>
+<span id="cb1-21"><a href="#cb1-21" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(scatterplot3d) <span class="co"># now that we have three inputs to estimate, we'll need higher dimension visualization</span></span>
+<span id="cb1-22"><a href="#cb1-22" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(tictoc)</span>
+<span id="cb1-23"><a href="#cb1-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-24"><a href="#cb1-24" aria-hidden="true" tabindex="-1"></a><span class="fu">options</span>(<span class="at">scipen =</span> <span class="dv">5</span>) </span>
+<span id="cb1-25"><a href="#cb1-25" aria-hidden="true" tabindex="-1"></a>transpose <span class="ot">&lt;-</span> purrr<span class="sc">::</span>transpose</span>
+<span id="cb1-26"><a href="#cb1-26" aria-hidden="true" tabindex="-1"></a>select <span class="ot">&lt;-</span> dplyr<span class="sc">::</span>select</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
+</section>
 <section id="calibration-targets" class="level1">
 <h1>Calibration Targets</h1>
 <p>There are three calibration targets to be used in this example:</p>
-<section id="observed-survival-of-a-cohort-over-time" class="level3">
-<h3 class="anchored" data-anchor-id="observed-survival-of-a-cohort-over-time">1. Observed survival of a cohort over time</h3>
+<section id="ct1.-observed-survival-of-a-cohort-over-time" class="level3">
+<h3 class="anchored" data-anchor-id="ct1.-observed-survival-of-a-cohort-over-time">CT1. Observed survival of a cohort over time</h3>
 <div class="cell">
 <div class="cell-output-display">
-<div class="tabwid"><style>.cl-74819f0a{}.cl-747ebb14{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-747feb06{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-747ff48e{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-747ff48f{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-747ff490{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-74819f0a"><caption><p>Survival Targets</p></caption><thead><tr style="overflow-wrap:break-word;"><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">time</span></p></th><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">n_total</span></p></th><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">n_alive</span></p></th><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">value</span></p></th><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">se</span></p></th><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">lb</span></p></th><th class="cl-747ff48e"><p class="cl-747feb06"><span class="cl-747ebb14">ub</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">1</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">500</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">498</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.996</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.002822765</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9856259</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9995152</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">2</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">500</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">491</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.982</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.005945755</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9661063</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9917370</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">3</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">500</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">486</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.972</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.007377805</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9534667</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9846094</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">4</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">500</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">482</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.964</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.008331146</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9436998</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9785271</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">5</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">500</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">475</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.950</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.009746794</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9270724</span></p></td><td class="cl-747ff48f"><p class="cl-747feb06"><span class="cl-747ebb14">0.9673848</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">6</span></p></td><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">500</span></p></td><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">470</span></p></td><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">0.940</span></p></td><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">0.010620734</span></p></td><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">0.9154514</span></p></td><td class="cl-747ff490"><p class="cl-747feb06"><span class="cl-747ebb14">0.9591558</span></p></td></tr></tbody></table></div>
+<div class="tabwid"><style>.cl-47778aa2{}.cl-4774cb00{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-4775e440{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-4775ec7e{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-4775ec88{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-4775ec89{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-47778aa2"><caption><p>Survival Targets</p></caption><thead><tr style="overflow-wrap:break-word;"><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">time</span></p></th><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">n_total</span></p></th><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">n_alive</span></p></th><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">value</span></p></th><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">se</span></p></th><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">lb</span></p></th><th class="cl-4775ec7e"><p class="cl-4775e440"><span class="cl-4774cb00">ub</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">1</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">500</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">498</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.996</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.002822765</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9856259</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9995152</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">2</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">500</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">491</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.982</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.005945755</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9661063</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9917370</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">3</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">500</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">486</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.972</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.007377805</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9534667</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9846094</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">4</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">500</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">482</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.964</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.008331146</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9436998</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9785271</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">5</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">500</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">475</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.950</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.009746794</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9270724</span></p></td><td class="cl-4775ec88"><p class="cl-4775e440"><span class="cl-4774cb00">0.9673848</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">6</span></p></td><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">500</span></p></td><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">470</span></p></td><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">0.940</span></p></td><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">0.010620734</span></p></td><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">0.9154514</span></p></td><td class="cl-4775ec89"><p class="cl-4775e440"><span class="cl-4774cb00">0.9591558</span></p></td></tr></tbody></table></div>
 </div>
 </div>
 </section>
-<section id="disease-prevalence-in-a-cohort-over-time" class="level3">
-<h3 class="anchored" data-anchor-id="disease-prevalence-in-a-cohort-over-time">2. Disease prevalence in a cohort over time;</h3>
+<section id="ct2.-disease-prevalence-in-a-cohort-over-time" class="level3">
+<h3 class="anchored" data-anchor-id="ct2.-disease-prevalence-in-a-cohort-over-time">CT2. Disease prevalence in a cohort over time;</h3>
 <div class="cell">
 <div class="cell-output-display">
-<div class="tabwid"><style>.cl-748a0ee2{}.cl-74879626{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-7488893c{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-74889102{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-7488910c{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-7488910d{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-748a0ee2"><caption><p>Prevalance Targets</p></caption><thead><tr style="overflow-wrap:break-word;"><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">time</span></p></th><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">n_alive</span></p></th><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">n_sick</span></p></th><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">value</span></p></th><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">se</span></p></th><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">lb</span></p></th><th class="cl-74889102"><p class="cl-7488893c"><span class="cl-74879626">ub</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">1</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">498</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">71</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1425703</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.01566748</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1130567</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1764026</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">2</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">491</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">100</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2036660</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.01817465</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1689009</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2420443</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">3</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">486</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">107</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2201646</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.01879564</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1840945</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2596789</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">4</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">482</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">106</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2199170</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.01886585</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1837177</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2595926</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">5</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">475</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">105</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2210526</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.01903948</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.1845186</span></p></td><td class="cl-7488910c"><p class="cl-7488893c"><span class="cl-74879626">0.2611004</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">6</span></p></td><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">470</span></p></td><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">120</span></p></td><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">0.2553191</span></p></td><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">0.02011305</span></p></td><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">0.2164804</span></p></td><td class="cl-7488910d"><p class="cl-7488893c"><span class="cl-74879626">0.2972681</span></p></td></tr></tbody></table></div>
+<div class="tabwid"><style>.cl-47803f44{}.cl-477dbf4e{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-477ebfca{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-477ec7a4{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-477ec7a5{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-477ec7a6{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-47803f44"><caption><p>Prevalance Targets</p></caption><thead><tr style="overflow-wrap:break-word;"><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">time</span></p></th><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">n_alive</span></p></th><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">n_sick</span></p></th><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">value</span></p></th><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">se</span></p></th><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">lb</span></p></th><th class="cl-477ec7a4"><p class="cl-477ebfca"><span class="cl-477dbf4e">ub</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">1</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">498</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">71</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1425703</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.01566748</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1130567</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1764026</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">2</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">491</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">100</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2036660</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.01817465</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1689009</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2420443</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">3</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">486</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">107</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2201646</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.01879564</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1840945</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2596789</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">4</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">482</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">106</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2199170</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.01886585</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1837177</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2595926</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">5</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">475</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">105</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2210526</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.01903948</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.1845186</span></p></td><td class="cl-477ec7a5"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2611004</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">6</span></p></td><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">470</span></p></td><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">120</span></p></td><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2553191</span></p></td><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.02011305</span></p></td><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2164804</span></p></td><td class="cl-477ec7a6"><p class="cl-477ebfca"><span class="cl-477dbf4e">0.2972681</span></p></td></tr></tbody></table></div>
 </div>
 </div>
 </section>
-<section id="among-sick-patients-s1s2-the-proportion-who-are-in-the-s1-state-at-three-points-in-time." class="level3">
-<h3 class="anchored" data-anchor-id="among-sick-patients-s1s2-the-proportion-who-are-in-the-s1-state-at-three-points-in-time.">3. Among sick patients (S1+S2), the proportion who are in the S1 state at three points in time.</h3>
+<section id="ct3.-among-sick-patients-s1s2-the-proportion-who-are-in-the-s1-state-at-three-points-in-time." class="level3">
+<h3 class="anchored" data-anchor-id="ct3.-among-sick-patients-s1s2-the-proportion-who-are-in-the-s1-state-at-three-points-in-time.">CT3. Among sick patients (S1+S2), the proportion who are in the S1 state at three points in time.</h3>
 <p>The first two targets came from an observational study of a typical cohort of individuals. The third target was obtained by subjecting ill patients to an invasive procedure which can determine disease stage but can’t be used routinely due to its invasiveness.</p>
 <div class="cell">
 <div class="cell-output-display">
-<div class="tabwid"><style>.cl-7491f1f2{}.cl-748fb086{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-749090e6{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-749098ac{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-749098ad{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-749098b6{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-7491f1f2"><caption><p>Prevalance Targets</p></caption><thead><tr style="overflow-wrap:break-word;"><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">time</span></p></th><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">n_total_sick</span></p></th><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">n_sick</span></p></th><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">value</span></p></th><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">se</span></p></th><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">lb</span></p></th><th class="cl-749098ac"><p class="cl-749090e6"><span class="cl-748fb086">ub</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">10</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">154</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">91</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.5909091</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.03961958</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.5088820</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.6693682</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">20</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">144</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">66</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.4583333</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.04152174</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.3751016</span></p></td><td class="cl-749098ad"><p class="cl-749090e6"><span class="cl-748fb086">0.5433146</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">30</span></p></td><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">119</span></p></td><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">38</span></p></td><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">0.3193277</span></p></td><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">0.04273797</span></p></td><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">0.2368615</span></p></td><td class="cl-749098b6"><p class="cl-749090e6"><span class="cl-748fb086">0.4110346</span></p></td></tr></tbody></table></div>
+<div class="tabwid"><style>.cl-47890ea8{}.cl-47861554{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-47870c84{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-478714b8{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-478714b9{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-478714ba{width:2in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-47890ea8"><caption><p>Prevalance Targets</p></caption><thead><tr style="overflow-wrap:break-word;"><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">time</span></p></th><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">n_total_sick</span></p></th><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">n_sick</span></p></th><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">value</span></p></th><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">se</span></p></th><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">lb</span></p></th><th class="cl-478714b8"><p class="cl-47870c84"><span class="cl-47861554">ub</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">10</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">154</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">91</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.5909091</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.03961958</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.5088820</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.6693682</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">20</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">144</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">66</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.4583333</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.04152174</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.3751016</span></p></td><td class="cl-478714b9"><p class="cl-47870c84"><span class="cl-47861554">0.5433146</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">30</span></p></td><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">119</span></p></td><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">38</span></p></td><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">0.3193277</span></p></td><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">0.04273797</span></p></td><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">0.2368615</span></p></td><td class="cl-478714ba"><p class="cl-47870c84"><span class="cl-47861554">0.4110346</span></p></td></tr></tbody></table></div>
+</div>
+</div>
+</section>
+</section>
+<section id="model-function-to-return-calibration-target-outcomes" class="level1">
+<h1>Model Function to Return Calibration Target Outcomes</h1>
+<div class="cell">
+<details class="code-fold">
+<summary>Parameterize Model and Construct Execution Function</summary>
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>   params_ <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>        <span class="at">v_tx_names =</span> <span class="fu">c</span>(<span class="st">"SoC"</span>),        <span class="co"># treatment names</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>        <span class="at">n_tx =</span> <span class="dv">2</span>,                                  <span class="co"># number of treatment strategies</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>        <span class="at">cycle_correction =</span> <span class="st">"half-cycle"</span>,    <span class="co"># Cycle correction method</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>        <span class="at">v_tr_names =</span> <span class="fu">c</span>(<span class="st">"H"</span>,<span class="st">"S1"</span>,<span class="st">"S2"</span>),             <span class="co"># transient health states</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>        <span class="at">v_ab_names =</span> <span class="fu">c</span>(<span class="st">"DOC"</span>,<span class="st">"DS"</span>),                <span class="co"># absorbing health states</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>        <span class="at">n_states =</span> <span class="dv">5</span>,                              <span class="co"># total number of health states</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>        <span class="at">horizon =</span> <span class="dv">30</span>,                             <span class="co"># Model time horizon (years)</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>        <span class="at">r_v_disc_h  =</span> <span class="fl">0.03</span>,                        <span class="co"># annual discount rate (health)</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>        <span class="at">r_v_disc_c =</span> <span class="fl">0.03</span>,                         <span class="co"># annual discount rate (costs)</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>        <span class="at">Delta_t =</span> <span class="dv">1</span>,                               <span class="co"># time step (1 = yearly)</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>        <span class="at">age0 =</span> <span class="dv">25</span>,                                 <span class="co"># age at baseline</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>        <span class="at">v_s0T =</span> <span class="fu">c</span>(<span class="dv">1</span>,<span class="dv">0</span>,<span class="dv">0</span>,<span class="dv">0</span>,<span class="dv">0</span>),                      <span class="co"># initial state occupancy  </span></span>
+<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>        <span class="at">r_HS1 =</span> <span class="sc">-</span><span class="fu">log</span>(<span class="dv">1</span><span class="fl">-0.15</span>),                      <span class="co"># disease onset rate</span></span>
+<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>        <span class="at">r_S1H =</span> <span class="sc">-</span><span class="fu">log</span>(<span class="dv">1</span><span class="fl">-0.5</span>),                       <span class="co"># recovery rate</span></span>
+<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>        <span class="at">r_S1S2 =</span> <span class="sc">-</span><span class="fu">log</span>(<span class="dv">1</span><span class="fl">-0.25</span>),                     <span class="co"># disease progression rate</span></span>
+<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>        <span class="at">r_HD =</span> <span class="sc">-</span><span class="fu">log</span>(<span class="dv">1</span><span class="fl">-.005</span>),                        <span class="co"># background mortality rate (p=0.03 in original; converting to rate)</span></span>
+<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>        <span class="at">hr_S1 =</span> <span class="fl">3.0</span>,                               <span class="co"># hazard rate of disease-related death from S1 state</span></span>
+<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>        <span class="at">hr_S2 =</span> <span class="fl">10.0</span>,                               <span class="co"># hazard rate of disease-related death from S2 state</span></span>
+<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>        <span class="at">u_H =</span> <span class="dv">1</span>,                                   <span class="co"># Healthy utility weight</span></span>
+<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>        <span class="at">u_S1 =</span> <span class="fl">0.75</span>,                               <span class="co"># Sick utility weight</span></span>
+<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>        <span class="at">u_S2 =</span> <span class="fl">0.5</span>,                                <span class="co"># Sicker utility weight</span></span>
+<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>        <span class="at">u_D =</span> <span class="dv">0</span>,                                   <span class="co"># Death utility weight</span></span>
+<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>        <span class="at">c_H =</span> <span class="dv">2000</span>,                                <span class="co"># annual cost of healthy</span></span>
+<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>        <span class="at">c_S1 =</span> <span class="dv">4000</span>,                               <span class="co"># annual cost of S1</span></span>
+<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>        <span class="at">c_S2 =</span> <span class="dv">15000</span>,                              <span class="co"># annual cost of S2</span></span>
+<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>        <span class="at">c_D =</span> <span class="dv">0</span>,                                   <span class="co"># annual cost of death</span></span>
+<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>        <span class="at">c_trtA =</span> <span class="dv">12000</span>,                            <span class="co"># cost of treatment A</span></span>
+<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>        <span class="at">u_trtA =</span> <span class="fl">0.95</span>,                             <span class="co"># utility weight for treatment A (S1 state)</span></span>
+<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>        <span class="at">c_trtB =</span> <span class="dv">13000</span>,                            <span class="co"># cost of treatment B</span></span>
+<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>        <span class="at">hr_S1S2_trtB =</span> <span class="fl">0.6</span>                        <span class="co"># reduction in rate of disease progression </span></span>
+<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a>    params <span class="ot">&lt;-</span> </span>
+<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a>        <span class="fu">with</span>(params_,{</span>
+<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>            <span class="fu">modifyList</span>(params_,<span class="fu">list</span>(</span>
+<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a>                <span class="at">v_names_states =</span> <span class="fu">c</span>(v_tr_names, v_ab_names), <span class="co"># health state names</span></span>
+<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>                <span class="at">omega =</span> horizon<span class="sc">/</span>Delta_t,  <span class="co"># Total number of cycles</span></span>
+<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a>                <span class="at">r_disc_h_Delta_t =</span> r_v_disc_h <span class="sc">*</span> Delta_t,  <span class="co"># Cycle discount rate: health outcomes</span></span>
+<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>                <span class="at">r_disc_c_Delta_t =</span> r_v_disc_c <span class="sc">*</span> Delta_t,  <span class="co"># Cycle discount rate: cost outcomes</span></span>
+<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a>                <span class="at">ages =</span> (<span class="dv">0</span><span class="sc">:</span>(horizon<span class="sc">/</span>Delta_t))<span class="sc">*</span>Delta_t <span class="sc">+</span> age0  <span class="co"># Age in each cycle</span></span>
+<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>            ))</span>
+<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a>        })</span>
+<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-61"><a href="#cb2-61" aria-hidden="true" tabindex="-1"></a>    params<span class="sc">$</span>ages_trace <span class="ot">&lt;-</span> params<span class="sc">$</span>ages</span>
+<span id="cb2-62"><a href="#cb2-62" aria-hidden="true" tabindex="-1"></a>    params<span class="sc">$</span>ages <span class="ot">&lt;-</span> params<span class="sc">$</span>ages[<span class="sc">-</span><span class="fu">length</span>(params<span class="sc">$</span>ages)] </span>
+<span id="cb2-63"><a href="#cb2-63" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-64"><a href="#cb2-64" aria-hidden="true" tabindex="-1"></a>    params <span class="ot">&lt;-</span></span>
+<span id="cb2-65"><a href="#cb2-65" aria-hidden="true" tabindex="-1"></a>        <span class="fu">with</span>(params, {</span>
+<span id="cb2-66"><a href="#cb2-66" aria-hidden="true" tabindex="-1"></a>            <span class="fu">modifyList</span>(params,</span>
+<span id="cb2-67"><a href="#cb2-67" aria-hidden="true" tabindex="-1"></a>                       <span class="fu">list</span>(</span>
+<span id="cb2-68"><a href="#cb2-68" aria-hidden="true" tabindex="-1"></a>                           <span class="at">v_discC_h =</span>  <span class="co"># Continuous time discounting: health outcomes</span></span>
+<span id="cb2-69"><a href="#cb2-69" aria-hidden="true" tabindex="-1"></a>                               <span class="fu">exp</span>(<span class="sc">-</span>r_disc_h_Delta_t  <span class="sc">*</span> <span class="dv">0</span><span class="sc">:</span>(omega)),</span>
+<span id="cb2-70"><a href="#cb2-70" aria-hidden="true" tabindex="-1"></a>                           <span class="at">v_discC_c =</span>  <span class="co"># Continuous time discounting: cost outcomes</span></span>
+<span id="cb2-71"><a href="#cb2-71" aria-hidden="true" tabindex="-1"></a>                               <span class="fu">exp</span>(<span class="sc">-</span>r_disc_c_Delta_t  <span class="sc">*</span> <span class="dv">0</span><span class="sc">:</span>(omega)),</span>
+<span id="cb2-72"><a href="#cb2-72" aria-hidden="true" tabindex="-1"></a>                           <span class="at">v_discD_h =</span>  <span class="co"># Discrete time discounting: health outcomes</span></span>
+<span id="cb2-73"><a href="#cb2-73" aria-hidden="true" tabindex="-1"></a>                               <span class="dv">1</span> <span class="sc">/</span> ((<span class="dv">1</span> <span class="sc">+</span> (params<span class="sc">$</span>r_disc_h_Delta_t)) <span class="sc">^</span> (<span class="dv">0</span><span class="sc">:</span>omega)),</span>
+<span id="cb2-74"><a href="#cb2-74" aria-hidden="true" tabindex="-1"></a>                           <span class="at">v_discD_c =</span>  <span class="co"># Discrete time discounting: cost outcomes</span></span>
+<span id="cb2-75"><a href="#cb2-75" aria-hidden="true" tabindex="-1"></a>                               <span class="dv">1</span> <span class="sc">/</span> ((<span class="dv">1</span> <span class="sc">+</span> (params<span class="sc">$</span>r_disc_c_Delta_t)) <span class="sc">^</span> (<span class="dv">0</span><span class="sc">:</span>omega))</span>
+<span id="cb2-76"><a href="#cb2-76" aria-hidden="true" tabindex="-1"></a>                       ))</span>
+<span id="cb2-77"><a href="#cb2-77" aria-hidden="true" tabindex="-1"></a>        })</span>
+<span id="cb2-78"><a href="#cb2-78" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-79"><a href="#cb2-79" aria-hidden="true" tabindex="-1"></a>    fn_r_HDOC <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-80"><a href="#cb2-80" aria-hidden="true" tabindex="-1"></a>        r_HD <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_HD"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-81"><a href="#cb2-81" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-82"><a href="#cb2-82" aria-hidden="true" tabindex="-1"></a>        r_HD <span class="sc">*</span> Delta_t</span>
+<span id="cb2-83"><a href="#cb2-83" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-84"><a href="#cb2-84" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-85"><a href="#cb2-85" aria-hidden="true" tabindex="-1"></a>    fn_r_HDS <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-86"><a href="#cb2-86" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-87"><a href="#cb2-87" aria-hidden="true" tabindex="-1"></a>        <span class="dv">0</span> <span class="sc">*</span> Delta_t</span>
+<span id="cb2-88"><a href="#cb2-88" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-89"><a href="#cb2-89" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-90"><a href="#cb2-90" aria-hidden="true" tabindex="-1"></a>    fn_r_S1DS <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-91"><a href="#cb2-91" aria-hidden="true" tabindex="-1"></a>        r_HD <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_HD"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-92"><a href="#cb2-92" aria-hidden="true" tabindex="-1"></a>        hr_S1 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"hr_S1"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-93"><a href="#cb2-93" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-94"><a href="#cb2-94" aria-hidden="true" tabindex="-1"></a>        (hr_S1 <span class="sc">*</span> r_HD <span class="sc">-</span> r_HD) <span class="sc">*</span> Delta_t</span>
+<span id="cb2-95"><a href="#cb2-95" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-96"><a href="#cb2-96" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-97"><a href="#cb2-97" aria-hidden="true" tabindex="-1"></a>    fn_r_S1DOC <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-98"><a href="#cb2-98" aria-hidden="true" tabindex="-1"></a>        r_HD <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_HD"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-99"><a href="#cb2-99" aria-hidden="true" tabindex="-1"></a>        hr_S1 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"hr_S1"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-100"><a href="#cb2-100" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-101"><a href="#cb2-101" aria-hidden="true" tabindex="-1"></a>        (r_HD) <span class="sc">*</span> Delta_t</span>
+<span id="cb2-102"><a href="#cb2-102" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-103"><a href="#cb2-103" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-104"><a href="#cb2-104" aria-hidden="true" tabindex="-1"></a>    fn_r_S2DS <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-105"><a href="#cb2-105" aria-hidden="true" tabindex="-1"></a>        r_HD <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_HD"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-106"><a href="#cb2-106" aria-hidden="true" tabindex="-1"></a>        hr_S2 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"hr_S2"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-107"><a href="#cb2-107" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-108"><a href="#cb2-108" aria-hidden="true" tabindex="-1"></a>        (hr_S2 <span class="sc">*</span> r_HD <span class="sc">-</span> r_HD) <span class="sc">*</span> Delta_t</span>
+<span id="cb2-109"><a href="#cb2-109" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-110"><a href="#cb2-110" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-111"><a href="#cb2-111" aria-hidden="true" tabindex="-1"></a>    fn_r_S2DOC <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-112"><a href="#cb2-112" aria-hidden="true" tabindex="-1"></a>        r_HD <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_HD"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-113"><a href="#cb2-113" aria-hidden="true" tabindex="-1"></a>        hr_S2 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"hr_S2"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-114"><a href="#cb2-114" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-115"><a href="#cb2-115" aria-hidden="true" tabindex="-1"></a>        (r_HD) <span class="sc">*</span> Delta_t</span>
+<span id="cb2-116"><a href="#cb2-116" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-117"><a href="#cb2-117" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-118"><a href="#cb2-118" aria-hidden="true" tabindex="-1"></a>    fn_r_HS1 <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-119"><a href="#cb2-119" aria-hidden="true" tabindex="-1"></a>        r_HS1 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_HS1"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-120"><a href="#cb2-120" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-121"><a href="#cb2-121" aria-hidden="true" tabindex="-1"></a>        r_HS1 <span class="sc">*</span> Delta_t</span>
+<span id="cb2-122"><a href="#cb2-122" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-123"><a href="#cb2-123" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-124"><a href="#cb2-124" aria-hidden="true" tabindex="-1"></a>    fn_r_S1H <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-125"><a href="#cb2-125" aria-hidden="true" tabindex="-1"></a>        r_S1H <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_S1H"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-126"><a href="#cb2-126" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-127"><a href="#cb2-127" aria-hidden="true" tabindex="-1"></a>        r_S1H <span class="sc">*</span> Delta_t</span>
+<span id="cb2-128"><a href="#cb2-128" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-129"><a href="#cb2-129" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-130"><a href="#cb2-130" aria-hidden="true" tabindex="-1"></a>    fn_r_S1S2 <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-131"><a href="#cb2-131" aria-hidden="true" tabindex="-1"></a>        r_S1S2 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_S1S2"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-132"><a href="#cb2-132" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-133"><a href="#cb2-133" aria-hidden="true" tabindex="-1"></a>        r_S1S2 <span class="sc">*</span> Delta_t</span>
+<span id="cb2-134"><a href="#cb2-134" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-135"><a href="#cb2-135" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb2-136"><a href="#cb2-136" aria-hidden="true" tabindex="-1"></a>    fn_r_S1S2_trtB <span class="ot">&lt;-</span> <span class="cf">function</span>(age) {</span>
+<span id="cb2-137"><a href="#cb2-137" aria-hidden="true" tabindex="-1"></a>        r_S1S2 <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"r_S1S2"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-138"><a href="#cb2-138" aria-hidden="true" tabindex="-1"></a>        hr_S1S2_trtB <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"hr_S1S2_trtB"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-139"><a href="#cb2-139" aria-hidden="true" tabindex="-1"></a>        Delta_t <span class="ot">&lt;-</span> <span class="fu">get</span>(<span class="st">"Delta_t"</span>, <span class="at">envir =</span> <span class="fu">parent.frame</span>())</span>
+<span id="cb2-140"><a href="#cb2-140" aria-hidden="true" tabindex="-1"></a>        hr_S1S2_trtB <span class="sc">*</span> r_S1S2 <span class="sc">*</span> Delta_t</span>
+<span id="cb2-141"><a href="#cb2-141" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb2-142"><a href="#cb2-142" aria-hidden="true" tabindex="-1"></a>    run_sick_sicker_markov <span class="ot">&lt;-</span> <span class="cf">function</span>(params, <span class="at">calibration_params =</span> <span class="cn">NULL</span>) {</span>
+<span id="cb2-143"><a href="#cb2-143" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-144"><a href="#cb2-144" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> (<span class="sc">!</span><span class="fu">is.null</span>(calibration_params)) {</span>
+<span id="cb2-145"><a href="#cb2-145" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> (<span class="sc">!</span><span class="fu">is.list</span>(calibration_params)) calibration_params <span class="ot">=</span> <span class="fu">as.list</span>(calibration_params)</span>
+<span id="cb2-146"><a href="#cb2-146" aria-hidden="true" tabindex="-1"></a>            params_tmp <span class="ot">=</span> <span class="fu">with</span>(params,<span class="fu">modifyList</span>(params,calibration_params))</span>
+<span id="cb2-147"><a href="#cb2-147" aria-hidden="true" tabindex="-1"></a>        } <span class="cf">else</span> params_tmp <span class="ot">=</span> params</span>
+<span id="cb2-148"><a href="#cb2-148" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-149"><a href="#cb2-149" aria-hidden="true" tabindex="-1"></a>        params_tmp <span class="ot">&lt;-</span> <span class="fu">with</span>(params_tmp,<span class="fu">modifyList</span>(params_tmp,<span class="fu">list</span>(</span>
+<span id="cb2-150"><a href="#cb2-150" aria-hidden="true" tabindex="-1"></a>            </span>
+<span id="cb2-151"><a href="#cb2-151" aria-hidden="true" tabindex="-1"></a>            <span class="co"># Natural History Transition Rate Matrix</span></span>
+<span id="cb2-152"><a href="#cb2-152" aria-hidden="true" tabindex="-1"></a>            <span class="at">m_P =</span> </span>
+<span id="cb2-153"><a href="#cb2-153" aria-hidden="true" tabindex="-1"></a>                ages <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>({</span>
+<span id="cb2-154"><a href="#cb2-154" aria-hidden="true" tabindex="-1"></a>                    </span>
+<span id="cb2-155"><a href="#cb2-155" aria-hidden="true" tabindex="-1"></a>                    mP_SoC <span class="ot">=</span> </span>
+<span id="cb2-156"><a href="#cb2-156" aria-hidden="true" tabindex="-1"></a>                        <span class="fu">matrix</span>(<span class="fu">c</span>(<span class="dv">0</span>,  <span class="co"># healthy -&gt; healthy  (will be calculated later)</span></span>
+<span id="cb2-157"><a href="#cb2-157" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_HS1</span>(.x) ,  <span class="co"># healthy -&gt; s1 </span></span>
+<span id="cb2-158"><a href="#cb2-158" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>, <span class="co"># healthy -&gt; S2</span></span>
+<span id="cb2-159"><a href="#cb2-159" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_HDOC</span>(.x) ,  <span class="co"># healthy -&gt; DOC</span></span>
+<span id="cb2-160"><a href="#cb2-160" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_HDS</span>(.x) , <span class="co"># healthy -&gt; DS</span></span>
+<span id="cb2-161"><a href="#cb2-161" aria-hidden="true" tabindex="-1"></a>                                 </span>
+<span id="cb2-162"><a href="#cb2-162" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_S1H</span>(.x) ,  <span class="co"># S1 -&gt; healthy</span></span>
+<span id="cb2-163"><a href="#cb2-163" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>, <span class="co"># S1 -&gt; S1 (will be calculated later)</span></span>
+<span id="cb2-164"><a href="#cb2-164" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_S1S2</span>(.x) ,  <span class="co"># S1 -&gt; S2</span></span>
+<span id="cb2-165"><a href="#cb2-165" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_S1DOC</span>(.x) , </span>
+<span id="cb2-166"><a href="#cb2-166" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_S1DS</span>(.x) , </span>
+<span id="cb2-167"><a href="#cb2-167" aria-hidden="true" tabindex="-1"></a>                                 </span>
+<span id="cb2-168"><a href="#cb2-168" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>,  <span class="co"># S2 -&gt; healthy</span></span>
+<span id="cb2-169"><a href="#cb2-169" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>, <span class="co"># S2 -&gt; S1</span></span>
+<span id="cb2-170"><a href="#cb2-170" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>,  <span class="co"># S2 -&gt; S2 (will be calculated later)</span></span>
+<span id="cb2-171"><a href="#cb2-171" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_S2DOC</span>(.x) , </span>
+<span id="cb2-172"><a href="#cb2-172" aria-hidden="true" tabindex="-1"></a>                                 <span class="fu">fn_r_S2DS</span>(.x), </span>
+<span id="cb2-173"><a href="#cb2-173" aria-hidden="true" tabindex="-1"></a>                                 </span>
+<span id="cb2-174"><a href="#cb2-174" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>, <span class="dv">0</span>, <span class="dv">0</span>, <span class="dv">0</span>, <span class="dv">0</span>,</span>
+<span id="cb2-175"><a href="#cb2-175" aria-hidden="true" tabindex="-1"></a>                                 <span class="dv">0</span>, <span class="dv">0</span>, <span class="dv">0</span>, <span class="dv">0</span>, <span class="dv">0</span></span>
+<span id="cb2-176"><a href="#cb2-176" aria-hidden="true" tabindex="-1"></a>                        ),</span>
+<span id="cb2-177"><a href="#cb2-177" aria-hidden="true" tabindex="-1"></a>                        <span class="at">nrow =</span> n_states, </span>
+<span id="cb2-178"><a href="#cb2-178" aria-hidden="true" tabindex="-1"></a>                        <span class="at">ncol =</span> n_states,</span>
+<span id="cb2-179"><a href="#cb2-179" aria-hidden="true" tabindex="-1"></a>                        <span class="at">byrow=</span><span class="cn">TRUE</span>, </span>
+<span id="cb2-180"><a href="#cb2-180" aria-hidden="true" tabindex="-1"></a>                        <span class="at">dimnames =</span> <span class="fu">list</span>(<span class="fu">c</span>(v_tr_names,v_ab_names),</span>
+<span id="cb2-181"><a href="#cb2-181" aria-hidden="true" tabindex="-1"></a>                                        <span class="fu">c</span>(v_tr_names,v_ab_names)</span>
+<span id="cb2-182"><a href="#cb2-182" aria-hidden="true" tabindex="-1"></a>                        ))</span>
+<span id="cb2-183"><a href="#cb2-183" aria-hidden="true" tabindex="-1"></a>                    </span>
+<span id="cb2-184"><a href="#cb2-184" aria-hidden="true" tabindex="-1"></a>                    <span class="co"># Balance matrix via diagonals to ensure probabilities sum to 1 across rows</span></span>
+<span id="cb2-185"><a href="#cb2-185" aria-hidden="true" tabindex="-1"></a>                    <span class="fu">diag</span>(mP_SoC) <span class="ot">=</span> <span class="sc">-</span> <span class="fu">rowSums</span>(mP_SoC)</span>
+<span id="cb2-186"><a href="#cb2-186" aria-hidden="true" tabindex="-1"></a>                    mP_SoC <span class="ot">=</span> <span class="fu">expm</span>(mP_SoC)</span>
+<span id="cb2-187"><a href="#cb2-187" aria-hidden="true" tabindex="-1"></a>                    </span>
+<span id="cb2-188"><a href="#cb2-188" aria-hidden="true" tabindex="-1"></a>                    <span class="fu">array</span>(<span class="fu">c</span>(<span class="fu">as.vector</span>(mP_SoC)), <span class="at">dim =</span> <span class="fu">c</span>(<span class="fu">length</span>(v_tr_names)<span class="sc">+</span><span class="fu">length</span>(v_ab_names),<span class="fu">length</span>(v_tr_names)<span class="sc">+</span><span class="fu">length</span>(v_ab_names),<span class="fu">length</span>(v_tx_names)),</span>
+<span id="cb2-189"><a href="#cb2-189" aria-hidden="true" tabindex="-1"></a>                          <span class="at">dimnames =</span> <span class="fu">list</span>(<span class="fu">c</span>(v_tr_names,v_ab_names),<span class="fu">c</span>(v_tr_names,v_ab_names),v_tx_names)) <span class="sc">%&gt;%</span> </span>
+<span id="cb2-190"><a href="#cb2-190" aria-hidden="true" tabindex="-1"></a>                        <span class="fu">apply</span>(.,<span class="dv">3</span>,<span class="cf">function</span>(x) x, <span class="at">simplify=</span><span class="cn">FALSE</span>) </span>
+<span id="cb2-191"><a href="#cb2-191" aria-hidden="true" tabindex="-1"></a>                    </span>
+<span id="cb2-192"><a href="#cb2-192" aria-hidden="true" tabindex="-1"></a>                }))</span>
+<span id="cb2-193"><a href="#cb2-193" aria-hidden="true" tabindex="-1"></a>        )))</span>
+<span id="cb2-194"><a href="#cb2-194" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-195"><a href="#cb2-195" aria-hidden="true" tabindex="-1"></a>        <span class="co"># THIS CODE FLIPS THE LIST OBJECT ABOVE INSIDE OUT, SO THAT IT IS LISTED</span></span>
+<span id="cb2-196"><a href="#cb2-196" aria-hidden="true" tabindex="-1"></a>        <span class="co"># BY STRATEGY-CYCLE RATHER THAN CYCLE-STRATEGY. </span></span>
+<span id="cb2-197"><a href="#cb2-197" aria-hidden="true" tabindex="-1"></a>        params_tmp<span class="sc">$</span>m_P <span class="ot">&lt;-</span> <span class="fu">transpose</span>(params_tmp<span class="sc">$</span>m_P)</span>
+<span id="cb2-198"><a href="#cb2-198" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-199"><a href="#cb2-199" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-200"><a href="#cb2-200" aria-hidden="true" tabindex="-1"></a>        <span class="do">## WE NOW ADD ON A CYCLE=0 TRANSITION PROBABILITY MATRIX WHERE</span></span>
+<span id="cb2-201"><a href="#cb2-201" aria-hidden="true" tabindex="-1"></a>        <span class="do">## EVERYONE STAYS IN THE SAME HEALTH STATE. </span></span>
+<span id="cb2-202"><a href="#cb2-202" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-203"><a href="#cb2-203" aria-hidden="true" tabindex="-1"></a>        params_tmp <span class="ot">&lt;-</span> <span class="fu">with</span>(params_tmp,<span class="fu">modifyList</span>(params_tmp,<span class="fu">list</span>(</span>
+<span id="cb2-204"><a href="#cb2-204" aria-hidden="true" tabindex="-1"></a>            <span class="at">m_P_ =</span> m_P <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>({</span>
+<span id="cb2-205"><a href="#cb2-205" aria-hidden="true" tabindex="-1"></a>                tmp <span class="ot">&lt;-</span> .x</span>
+<span id="cb2-206"><a href="#cb2-206" aria-hidden="true" tabindex="-1"></a>                init <span class="ot">&lt;-</span> <span class="fu">diag</span>(<span class="at">nrow=</span><span class="fu">nrow</span>(tmp[[<span class="dv">1</span>]]),<span class="at">ncol=</span><span class="fu">ncol</span>(tmp[[<span class="dv">1</span>]]))</span>
+<span id="cb2-207"><a href="#cb2-207" aria-hidden="true" tabindex="-1"></a>                <span class="fu">dimnames</span>(init) <span class="ot">=</span> <span class="fu">dimnames</span>(tmp[[<span class="dv">1</span>]])</span>
+<span id="cb2-208"><a href="#cb2-208" aria-hidden="true" tabindex="-1"></a>                <span class="fu">append</span>(.x,<span class="fu">list</span>(init),<span class="at">after=</span><span class="dv">0</span>)</span>
+<span id="cb2-209"><a href="#cb2-209" aria-hidden="true" tabindex="-1"></a>            }))</span>
+<span id="cb2-210"><a href="#cb2-210" aria-hidden="true" tabindex="-1"></a>        )))</span>
+<span id="cb2-211"><a href="#cb2-211" aria-hidden="true" tabindex="-1"></a>        params_tmp<span class="sc">$</span>m_P <span class="ot">=</span> params_tmp<span class="sc">$</span>m_P_</span>
+<span id="cb2-212"><a href="#cb2-212" aria-hidden="true" tabindex="-1"></a>        params_tmp[[<span class="st">"m_P_"</span>]] <span class="ot">&lt;-</span> <span class="cn">NULL</span></span>
+<span id="cb2-213"><a href="#cb2-213" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-214"><a href="#cb2-214" aria-hidden="true" tabindex="-1"></a>        trace_ref <span class="ot">&lt;-</span> </span>
+<span id="cb2-215"><a href="#cb2-215" aria-hidden="true" tabindex="-1"></a>            <span class="fu">with</span>(params_tmp, {</span>
+<span id="cb2-216"><a href="#cb2-216" aria-hidden="true" tabindex="-1"></a>                m_P <span class="sc">%&gt;%</span> <span class="fu">map</span>( <span class="sc">~</span> ({</span>
+<span id="cb2-217"><a href="#cb2-217" aria-hidden="true" tabindex="-1"></a>                    P <span class="ot">=</span> .x</span>
+<span id="cb2-218"><a href="#cb2-218" aria-hidden="true" tabindex="-1"></a>                    occ <span class="ot">&lt;-</span> v_s0T</span>
+<span id="cb2-219"><a href="#cb2-219" aria-hidden="true" tabindex="-1"></a>                    P <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>({</span>
+<span id="cb2-220"><a href="#cb2-220" aria-hidden="true" tabindex="-1"></a>                        occ <span class="ot">&lt;&lt;-</span> occ <span class="sc">%*%</span> .x</span>
+<span id="cb2-221"><a href="#cb2-221" aria-hidden="true" tabindex="-1"></a>                    })) <span class="sc">%&gt;%</span> </span>
+<span id="cb2-222"><a href="#cb2-222" aria-hidden="true" tabindex="-1"></a>                        <span class="fu">map</span>(<span class="sc">~</span>(<span class="fu">data.frame</span>(.x))) <span class="sc">%&gt;%</span> </span>
+<span id="cb2-223"><a href="#cb2-223" aria-hidden="true" tabindex="-1"></a>                        <span class="fu">bind_rows</span>()</span>
+<span id="cb2-224"><a href="#cb2-224" aria-hidden="true" tabindex="-1"></a>                }))</span>
+<span id="cb2-225"><a href="#cb2-225" aria-hidden="true" tabindex="-1"></a>            }) </span>
+<span id="cb2-226"><a href="#cb2-226" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-227"><a href="#cb2-227" aria-hidden="true" tabindex="-1"></a>        trace_ref <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>({</span>
+<span id="cb2-228"><a href="#cb2-228" aria-hidden="true" tabindex="-1"></a>            Surv <span class="ot">=</span> (<span class="dv">1</span><span class="sc">-</span><span class="fu">rowSums</span>(.x[,params_tmp<span class="sc">$</span>v_ab_names]))</span>
+<span id="cb2-229"><a href="#cb2-229" aria-hidden="true" tabindex="-1"></a>            Prev <span class="ot">=</span> (<span class="fu">rowSums</span>(.x[,<span class="fu">c</span>(<span class="st">"S1"</span>,<span class="st">"S2"</span>)])<span class="sc">/</span>Surv)</span>
+<span id="cb2-230"><a href="#cb2-230" aria-hidden="true" tabindex="-1"></a>            PropSick <span class="ot">=</span> .x[, <span class="st">"S1"</span>] <span class="sc">/</span> Prev</span>
+<span id="cb2-231"><a href="#cb2-231" aria-hidden="true" tabindex="-1"></a>            <span class="fu">list</span>( <span class="at">Surv =</span> Surv[<span class="sc">-</span><span class="dv">1</span>],</span>
+<span id="cb2-232"><a href="#cb2-232" aria-hidden="true" tabindex="-1"></a>                  <span class="at">Prev =</span> Prev[<span class="sc">-</span><span class="dv">1</span>],</span>
+<span id="cb2-233"><a href="#cb2-233" aria-hidden="true" tabindex="-1"></a>                  <span class="at">PropSick =</span> PropSick[<span class="fu">c</span>(<span class="dv">11</span>,<span class="dv">21</span>,<span class="dv">31</span>)])</span>
+<span id="cb2-234"><a href="#cb2-234" aria-hidden="true" tabindex="-1"></a>        })) <span class="sc">%&gt;%</span> </span>
+<span id="cb2-235"><a href="#cb2-235" aria-hidden="true" tabindex="-1"></a>            <span class="fu">pluck</span>(<span class="dv">1</span>) </span>
+<span id="cb2-236"><a href="#cb2-236" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb2-237"><a href="#cb2-237" aria-hidden="true" tabindex="-1"></a>    }</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+<details class="code-fold">
+<summary>Plot initial vs.&nbsp;target outcomes</summary>
+<div class="sourceCode cell-code" id="cb3"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>result_init <span class="ot">&lt;-</span> <span class="co"># Initial Comparson</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="fu">map2</span>(lst_targets,</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>         <span class="fu">run_sick_sicker_markov</span>(params),</span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>         <span class="sc">~</span> (</span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>             .x <span class="sc">%&gt;%</span> <span class="fu">select</span>(time, <span class="at">target =</span> value, lb, ub) <span class="sc">%&gt;%</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>                 <span class="fu">cbind.data.frame</span>(<span class="at">initial =</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>                                      .y)</span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>         )) </span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>plot_calib <span class="ot">&lt;-</span> <span class="co"># plot initial comparison</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    result_init <span class="sc">%&gt;%</span> <span class="fu">map</span>(</span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>        <span class="sc">~</span> (</span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a>            .x <span class="sc">%&gt;%</span> <span class="fu">as_tibble</span>() <span class="sc">%&gt;%</span> </span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">gather</span>(var, value, <span class="sc">-</span>time, <span class="sc">-</span>lb, <span class="sc">-</span>ub)  <span class="sc">%&gt;%</span> </span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>    <span class="fu">ggplot</span>(<span class="fu">aes</span>(<span class="at">x =</span> time, <span class="at">y =</span> value, <span class="at">colour =</span> var)) <span class="sc">+</span> </span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>() <span class="sc">+</span> </span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_errorbar</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lb, <span class="at">ymax =</span> ub, <span class="at">colour =</span> var)) <span class="sc">+</span> </span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>    ggsci<span class="sc">::</span><span class="fu">scale_color_aaas</span>(<span class="at">name =</span> <span class="st">"Model Outcome"</span>, <span class="at">labels =</span> <span class="fu">c</span>(<span class="st">"Initial"</span>,<span class="st">"Target"</span>)) <span class="sc">+</span> </span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>    hrbrthemes<span class="sc">::</span><span class="fu">theme_ipsum</span>() <span class="sc">+</span> </span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.position =</span> <span class="fu">c</span>(<span class="fl">0.8</span>,<span class="fl">0.8</span>),  <span class="co"># Position inside the plot</span></span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.background =</span> <span class="fu">element_rect</span>(</span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>      <span class="at">fill =</span> <span class="st">"white"</span>,  <span class="co"># Semi-transparent background</span></span>
+<span id="cb3-25"><a href="#cb3-25" aria-hidden="true" tabindex="-1"></a>      <span class="at">color =</span> <span class="st">"black"</span></span>
+<span id="cb3-26"><a href="#cb3-26" aria-hidden="true" tabindex="-1"></a>    ),</span>
+<span id="cb3-27"><a href="#cb3-27" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.title =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">12</span>),</span>
+<span id="cb3-28"><a href="#cb3-28" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.text =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
+<span id="cb3-29"><a href="#cb3-29" aria-hidden="true" tabindex="-1"></a>  )  <span class="sc">+</span> </span>
+<span id="cb3-30"><a href="#cb3-30" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">"Cycle"</span>, <span class="at">y =</span> <span class="st">"Value"</span>)</span>
+<span id="cb3-31"><a href="#cb3-31" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb3-32"><a href="#cb3-32" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb3-33"><a href="#cb3-33" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">1</span>]]</span>
+<span id="cb3-34"><a href="#cb3-34" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">2</span>]]</span>
+<span id="cb3-35"><a href="#cb3-35" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">3</span>]]</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell quarto-layout-panel" data-layout-ncol="3">
+<div class="quarto-layout-row">
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-5-1.png" class="lightbox" data-gallery="quarto-lightbox-gallery-1" title="Survivial"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-5-1.png" class="img-fluid figure-img" width="672" alt="Survivial"></a></p>
+<figcaption>Survivial</figcaption>
+</figure>
+</div>
+</div>
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-5-2.png" class="lightbox" data-gallery="quarto-lightbox-gallery-2" title="Disease Prevalence"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-5-2.png" class="img-fluid figure-img" width="672" alt="Disease Prevalence"></a></p>
+<figcaption>Disease Prevalence</figcaption>
+</figure>
+</div>
+</div>
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-5-3.png" class="lightbox" data-gallery="quarto-lightbox-gallery-3" title="Proportion in S1 State"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-5-3.png" class="img-fluid figure-img" width="672" alt="Proportion in S1 State"></a></p>
+<figcaption>Proportion in S1 State</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</div>
+</section>
+<section id="calibration-using-differential-evolution-genetic-optimization" class="level1">
+<h1>Calibration Using Differential Evolution Genetic Optimization</h1>
+<p>Differential Evolution (DE) is a population-based optimization algorithm, primarily used for solving complex multidimensional optimization problems <span class="citation" data-cites="das2010differential">(<a href="#ref-das2010differential" role="doc-biblioref">Das and Suganthan 2010</a>)</span>. It is a heuristic approach that iteratively improves a candidate solution based on simple mathematical operators, making it suitable for nonlinear, non-differentiable, and multi-modal functions.</p>
+<div class="cell">
+<details class="code-fold">
+<summary>Function to Calibrate Using Differential Evolution (DE) Optimization</summary>
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>calibrate_model_de <span class="ot">&lt;-</span> <span class="cf">function</span>(params, </span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>                            parameters_to_calibrate,</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>                            <span class="at">seed =</span> <span class="dv">072218</span>,</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>                            <span class="at">n_init =</span> <span class="dv">1</span>, </span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>                            <span class="at">n_resamp =</span> <span class="dv">1000</span>,</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>                            <span class="at">max.iter =</span> <span class="dv">50</span>, </span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>                            <span class="at">model_fn =</span> run_sick_sicker_markov,</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>                            <span class="at">calibration_targets =</span> lst_targets) {</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>   </span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>    lb <span class="ot">&lt;-</span> parameters_to_calibrate <span class="sc">%&gt;%</span> <span class="fu">transpose</span>() <span class="sc">%&gt;%</span> <span class="fu">pluck</span>(<span class="st">"lb"</span>) <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>(<span class="fu">as.numeric</span>(.x))) <span class="sc">%&gt;%</span> <span class="fu">unlist</span>()</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>    ub <span class="ot">&lt;-</span> parameters_to_calibrate <span class="sc">%&gt;%</span> <span class="fu">transpose</span>() <span class="sc">%&gt;%</span> <span class="fu">pluck</span>(<span class="st">"ub"</span>) <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>(<span class="fu">as.numeric</span>(.x))) <span class="sc">%&gt;%</span> <span class="fu">unlist</span>()</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>    <span class="co"># number of calibration targets</span></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a>    v_target_names <span class="ot">&lt;-</span> <span class="fu">names</span>(calibration_targets)</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>    n_target <span class="ot">&lt;-</span> <span class="fu">length</span>(v_target_names)</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a>    v_param_names <span class="ot">&lt;-</span> <span class="fu">names</span>(parameters_to_calibrate)</span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a>    n_param <span class="ot">&lt;-</span> <span class="fu">length</span>(v_param_names)</span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a>    <span class="do">###  Sample multiple random starting values for Nelder-Mead  </span><span class="al">###</span></span>
+<span id="cb4-23"><a href="#cb4-23" aria-hidden="true" tabindex="-1"></a>    v_params_init <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="at">nrow=</span>n_init,<span class="at">ncol=</span>n_param)</span>
+<span id="cb4-24"><a href="#cb4-24" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>n_target){</span>
+<span id="cb4-25"><a href="#cb4-25" aria-hidden="true" tabindex="-1"></a>        v_params_init[,i] <span class="ot">&lt;-</span> <span class="fu">runif</span>(n_init,<span class="at">min=</span>lb[i],<span class="at">max=</span>ub[i])</span>
+<span id="cb4-26"><a href="#cb4-26" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-27"><a href="#cb4-27" aria-hidden="true" tabindex="-1"></a>    <span class="fu">colnames</span>(v_params_init) <span class="ot">&lt;-</span> v_param_names</span>
+<span id="cb4-28"><a href="#cb4-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-29"><a href="#cb4-29" aria-hidden="true" tabindex="-1"></a>    f_gof <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params){</span>
+<span id="cb4-30"><a href="#cb4-30" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-31"><a href="#cb4-31" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span>(<span class="sc">!</span><span class="fu">is.list</span>(v_params)) v_params <span class="ot">=</span> <span class="fu">as.list</span>(v_params)</span>
+<span id="cb4-32"><a href="#cb4-32" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-33"><a href="#cb4-33" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Run model for parametr set "v_params"</span></span>
+<span id="cb4-34"><a href="#cb4-34" aria-hidden="true" tabindex="-1"></a>        model_res <span class="ot">&lt;-</span> <span class="fu">model_fn</span>(params, <span class="at">calibration_params =</span> v_params)</span>
+<span id="cb4-35"><a href="#cb4-35" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-36"><a href="#cb4-36" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Could hypothetically set unequal weights if we wanted</span></span>
+<span id="cb4-37"><a href="#cb4-37" aria-hidden="true" tabindex="-1"></a>        weights <span class="ot">=</span> <span class="fu">rep</span>(<span class="dv">1</span>, n_target)</span>
+<span id="cb4-38"><a href="#cb4-38" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb4-39"><a href="#cb4-39" aria-hidden="true" tabindex="-1"></a>        GOF_overall <span class="ot">&lt;-</span> <span class="fu">map2</span>(calibration_targets, <span class="fu">names</span>(calibration_targets), <span class="sc">~</span></span>
+<span id="cb4-40"><a href="#cb4-40" aria-hidden="true" tabindex="-1"></a>                                ({</span>
+<span id="cb4-41"><a href="#cb4-41" aria-hidden="true" tabindex="-1"></a>                                    <span class="fu">sum</span>(<span class="fu">dnorm</span>(</span>
+<span id="cb4-42"><a href="#cb4-42" aria-hidden="true" tabindex="-1"></a>                                        <span class="at">x =</span> .x[[<span class="st">"value"</span>]],</span>
+<span id="cb4-43"><a href="#cb4-43" aria-hidden="true" tabindex="-1"></a>                                        <span class="at">mean =</span> model_res[[.y]],</span>
+<span id="cb4-44"><a href="#cb4-44" aria-hidden="true" tabindex="-1"></a>                                        <span class="at">sd =</span> .x[[<span class="st">"se"</span>]],</span>
+<span id="cb4-45"><a href="#cb4-45" aria-hidden="true" tabindex="-1"></a>                                        <span class="at">log =</span> <span class="cn">TRUE</span></span>
+<span id="cb4-46"><a href="#cb4-46" aria-hidden="true" tabindex="-1"></a>                                    ))</span>
+<span id="cb4-47"><a href="#cb4-47" aria-hidden="true" tabindex="-1"></a>                                })) <span class="sc">%&gt;%</span></span>
+<span id="cb4-48"><a href="#cb4-48" aria-hidden="true" tabindex="-1"></a>            <span class="fu">map2_dbl</span>(., weights,  <span class="sc">~</span> ({</span>
+<span id="cb4-49"><a href="#cb4-49" aria-hidden="true" tabindex="-1"></a>                .x <span class="sc">*</span> .y</span>
+<span id="cb4-50"><a href="#cb4-50" aria-hidden="true" tabindex="-1"></a>            })) <span class="sc">%&gt;%</span></span>
+<span id="cb4-51"><a href="#cb4-51" aria-hidden="true" tabindex="-1"></a>            <span class="fu">sum</span>()</span>
+<span id="cb4-52"><a href="#cb4-52" aria-hidden="true" tabindex="-1"></a>        <span class="co"># return GOF</span></span>
+<span id="cb4-53"><a href="#cb4-53" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span>(GOF_overall)</span>
+<span id="cb4-54"><a href="#cb4-54" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-55"><a href="#cb4-55" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-56"><a href="#cb4-56" aria-hidden="true" tabindex="-1"></a>    m_calib_res <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="at">nrow =</span> n_init, <span class="at">ncol =</span> n_param<span class="sc">+</span><span class="dv">1</span>)</span>
+<span id="cb4-57"><a href="#cb4-57" aria-hidden="true" tabindex="-1"></a>    <span class="fu">colnames</span>(m_calib_res) <span class="ot">&lt;-</span> <span class="fu">c</span>(v_param_names, <span class="st">"Overall_fit"</span>)</span>
+<span id="cb4-58"><a href="#cb4-58" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-59"><a href="#cb4-59" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-60"><a href="#cb4-60" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-61"><a href="#cb4-61" aria-hidden="true" tabindex="-1"></a>    f_fitness <span class="ot">&lt;-</span> <span class="cf">function</span>(params) {</span>
+<span id="cb4-62"><a href="#cb4-62" aria-hidden="true" tabindex="-1"></a>        <span class="fu">names</span>(params) <span class="ot">=</span> v_param_names</span>
+<span id="cb4-63"><a href="#cb4-63" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span>(<span class="sc">-</span><span class="fu">f_gof</span>(params))</span>
+<span id="cb4-64"><a href="#cb4-64" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb4-65"><a href="#cb4-65" aria-hidden="true" tabindex="-1"></a>    fit_ga <span class="ot">=</span> <span class="fu">DEoptim</span>(f_fitness, <span class="at">lower =</span> lb, <span class="at">upper =</span> ub, <span class="at">control =</span> <span class="fu">list</span>(<span class="at">itermax =</span> max.iter))</span>
+<span id="cb4-66"><a href="#cb4-66" aria-hidden="true" tabindex="-1"></a>    m_calib_res <span class="ot">=</span> <span class="fu">c</span>(fit_ga<span class="sc">$</span>optim<span class="sc">$</span>bestmem, <span class="sc">-</span><span class="dv">1</span> <span class="sc">*</span> fit_ga<span class="sc">$</span>optim<span class="sc">$</span>bestval)</span>
+<span id="cb4-67"><a href="#cb4-67" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-68"><a href="#cb4-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-69"><a href="#cb4-69" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-70"><a href="#cb4-70" aria-hidden="true" tabindex="-1"></a>    out <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">param =</span> m_calib_res[v_param_names])</span>
+<span id="cb4-71"><a href="#cb4-71" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb4-72"><a href="#cb4-72" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span>(out)</span>
+<span id="cb4-73"><a href="#cb4-73" aria-hidden="true" tabindex="-1"></a>}</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>parameters_to_calibrate <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">r_S1S2 =</span> <span class="fu">c</span>(<span class="st">"uniform"</span>, <span class="at">lb =</span> <span class="sc">-</span><span class="fu">log</span>(<span class="dv">1</span><span class="fl">-.01</span>), <span class="at">ub =</span> <span class="sc">-</span><span class="fu">log</span>(<span class="dv">1</span><span class="fl">-0.5</span>)),</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>                                <span class="at">hr_S1 =</span> <span class="fu">c</span>(<span class="st">"uniform"</span>, <span class="at">lb =</span> <span class="dv">1</span>, <span class="at">ub =</span> <span class="dv">10</span>),</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>                                <span class="at">hr_S2 =</span> <span class="fu">c</span>(<span class="st">"uniform"</span>, <span class="at">lb =</span> <span class="dv">5</span>, <span class="at">ub =</span> <span class="dv">15</span>))</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>res_de <span class="ot">&lt;-</span> <span class="fu">calibrate_model_de</span>(</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    <span class="at">params =</span> params,</span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>        <span class="at">parameters_to_calibrate =</span> parameters_to_calibrate,</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>        <span class="at">seed =</span> <span class="dv">072218</span>,</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>        <span class="at">n_init =</span> <span class="dv">1</span>, </span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>        <span class="at">model_fn =</span> run_sick_sicker_markov,</span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>        <span class="at">calibration_targets =</span> lst_targets</span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<details class="code-fold">
+<summary>Calibration via Differential Evolution</summary>
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>result_de <span class="ot">&lt;-</span> <span class="fu">map2</span>(result_init,<span class="fu">run_sick_sicker_markov</span>(params, res_de<span class="sc">$</span>param),<span class="sc">~</span>({</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    .x <span class="sc">%&gt;%</span> <span class="fu">cbind.data.frame</span>(<span class="at">calibrated_de =</span> .y)</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>}))</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>plot_calib <span class="ot">&lt;-</span> <span class="co"># plot initial comparison</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    result_de <span class="sc">%&gt;%</span> <span class="fu">map</span>(</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>        <span class="sc">~</span> (</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>            .x <span class="sc">%&gt;%</span> <span class="fu">as_tibble</span>() <span class="sc">%&gt;%</span> </span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">gather</span>(var, value, <span class="sc">-</span>time, <span class="sc">-</span>lb, <span class="sc">-</span>ub)  <span class="sc">%&gt;%</span> </span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">ggplot</span>(<span class="fu">aes</span>(<span class="at">x =</span> time, <span class="at">y =</span> value, <span class="at">colour =</span> var)) <span class="sc">+</span> </span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>() <span class="sc">+</span> </span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_errorbar</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lb, <span class="at">ymax =</span> ub, <span class="at">colour =</span> var)) <span class="sc">+</span> </span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a>    ggsci<span class="sc">::</span><span class="fu">scale_color_aaas</span>(<span class="at">name =</span> <span class="st">"Model Outcome"</span>, <span class="at">labels =</span> <span class="fu">c</span>(<span class="st">"Calibrated"</span>,<span class="st">"Initial"</span>,<span class="st">"Target"</span>)) <span class="sc">+</span> </span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>    hrbrthemes<span class="sc">::</span><span class="fu">theme_ipsum</span>() <span class="sc">+</span> </span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.position =</span> <span class="fu">c</span>(<span class="fl">0.8</span>,<span class="fl">0.8</span>),  <span class="co"># Position inside the plot</span></span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.background =</span> <span class="fu">element_rect</span>(</span>
+<span id="cb6-18"><a href="#cb6-18" aria-hidden="true" tabindex="-1"></a>      <span class="at">fill =</span> <span class="st">"white"</span>,  <span class="co"># Semi-transparent background</span></span>
+<span id="cb6-19"><a href="#cb6-19" aria-hidden="true" tabindex="-1"></a>      <span class="at">color =</span> <span class="st">"black"</span></span>
+<span id="cb6-20"><a href="#cb6-20" aria-hidden="true" tabindex="-1"></a>    ),</span>
+<span id="cb6-21"><a href="#cb6-21" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.title =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">12</span>),</span>
+<span id="cb6-22"><a href="#cb6-22" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.text =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
+<span id="cb6-23"><a href="#cb6-23" aria-hidden="true" tabindex="-1"></a>  )  <span class="sc">+</span> </span>
+<span id="cb6-24"><a href="#cb6-24" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">"Cycle"</span>, <span class="at">y =</span> <span class="st">"Value"</span>)</span>
+<span id="cb6-25"><a href="#cb6-25" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb6-26"><a href="#cb6-26" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb6-27"><a href="#cb6-27" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">1</span>]]</span>
+<span id="cb6-28"><a href="#cb6-28" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">2</span>]]</span>
+<span id="cb6-29"><a href="#cb6-29" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">3</span>]]</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell quarto-layout-panel" data-layout-ncol="3">
+<div class="quarto-layout-row">
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-8-1.png" class="lightbox" data-gallery="quarto-lightbox-gallery-4" title="Survivial"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-8-1.png" class="img-fluid figure-img" width="672" alt="Survivial"></a></p>
+<figcaption>Survivial</figcaption>
+</figure>
+</div>
+</div>
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-8-2.png" class="lightbox" data-gallery="quarto-lightbox-gallery-5" title="Disease Prevalence"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-8-2.png" class="img-fluid figure-img" width="672" alt="Disease Prevalence"></a></p>
+<figcaption>Disease Prevalence</figcaption>
+</figure>
+</div>
+</div>
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-8-3.png" class="lightbox" data-gallery="quarto-lightbox-gallery-6" title="Proportion in S1 State"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-8-3.png" class="img-fluid figure-img" width="672" alt="Proportion in S1 State"></a></p>
+<figcaption>Proportion in S1 State</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</div>
+</section>
+<section id="calibration-using-incremental-mixture-importance-sampling" class="level1">
+<h1>Calibration Using Incremental Mixture Importance Sampling</h1>
+<p>Incremental Mixture Importance Sampling (IMIS) is an advanced Monte Carlo method for Bayesian inference and model calibration <span class="citation" data-cites="steele2006computing">(<a href="#ref-steele2006computing" role="doc-biblioref">Steele, Raftery, and Emond 2006</a>)</span>. It improves upon traditional importance sampling by incrementally building a proposal distribution that closely approximates the target posterior distribution. IMIS starts with an initial proposal and iteratively adds Gaussian components centered around high-probability regions identified from previous samples. This adaptive mixture focuses computational effort on areas where the posterior density is significant, enhancing sampling efficiency and accuracy, especially in complex or multimodal distributions.</p>
+<p>Compared to genetic algorithms like Differential Evolution (DE) optimization, IMIS offers several benefits:</p>
+<ol type="1">
+<li><p>Uncertainty Quantification: IMIS provides the full posterior distribution of parameters, enabling direct estimation of uncertainties and credible intervals. In contrast, DE optimization typically yields point estimates without inherent measures of uncertainty.</p></li>
+<li><p>Adaptive and Targeted Sampling: IMIS adaptively refines its sampling strategy based on previous iterations, efficiently exploring high-probability regions. DE may require more iterations and can struggle with convergence in complex landscapes.</p></li>
+<li><p>Incorporation of Prior Information: IMIS operates within a Bayesian framework, naturally integrating prior knowledge into the analysis. DE lacks straightforward mechanisms for incorporating priors.</p></li>
+</ol>
+<div class="cell">
+<details class="code-fold">
+<summary>Function to Calibrate Using IMIS</summary>
+<div class="sourceCode cell-code" id="cb7"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>calibrate_model_imis <span class="ot">&lt;-</span> <span class="cf">function</span>(params,</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>                parameters_to_calibrate,</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>                <span class="at">seed =</span> <span class="dv">072218</span>,</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>                <span class="at">n_init =</span> <span class="dv">1</span>,</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>                <span class="at">n_resamp =</span> <span class="dv">1000</span>,</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a>                <span class="at">model_fn =</span> run_sick_sicker_markov,</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a>                <span class="at">calibration_targets =</span> lst_targets) {</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">set.seed</span>(seed)  <span class="co"># Use the seed parameter</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    params <span class="ot">&lt;-</span> params</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a>    lb <span class="ot">&lt;-</span> parameters_to_calibrate <span class="sc">%&gt;%</span> <span class="fu">transpose</span>() <span class="sc">%&gt;%</span> <span class="fu">pluck</span>(<span class="st">"lb"</span>) <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>(<span class="fu">as.numeric</span>(.x))) <span class="sc">%&gt;%</span> <span class="fu">unlist</span>()</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a>    ub <span class="ot">&lt;-</span> parameters_to_calibrate <span class="sc">%&gt;%</span> <span class="fu">transpose</span>() <span class="sc">%&gt;%</span> <span class="fu">pluck</span>(<span class="st">"ub"</span>) <span class="sc">%&gt;%</span> <span class="fu">map</span>(<span class="sc">~</span>(<span class="fu">as.numeric</span>(.x))) <span class="sc">%&gt;%</span> <span class="fu">unlist</span>()</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Number of calibration targets</span></span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>    v_target_names <span class="ot">&lt;-</span> <span class="fu">names</span>(calibration_targets)</span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>    n_target <span class="ot">&lt;-</span> <span class="fu">length</span>(v_target_names)</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>    v_param_names <span class="ot">&lt;-</span> <span class="fu">names</span>(parameters_to_calibrate)</span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a>    n_param <span class="ot">&lt;-</span> <span class="fu">length</span>(v_param_names)</span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-22"><a href="#cb7-22" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Write function to sample from prior</span></span>
+<span id="cb7-23"><a href="#cb7-23" aria-hidden="true" tabindex="-1"></a>    sample.prior <span class="ot">&lt;-</span> <span class="cf">function</span>(n_samp){</span>
+<span id="cb7-24"><a href="#cb7-24" aria-hidden="true" tabindex="-1"></a>        m_lhs_unit   <span class="ot">&lt;-</span> <span class="fu">randomLHS</span>(<span class="at">n =</span> n_samp, <span class="at">k =</span> n_param)</span>
+<span id="cb7-25"><a href="#cb7-25" aria-hidden="true" tabindex="-1"></a>        m_param_samp <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="at">nrow =</span> n_samp, <span class="at">ncol =</span> n_param)</span>
+<span id="cb7-26"><a href="#cb7-26" aria-hidden="true" tabindex="-1"></a>        <span class="fu">colnames</span>(m_param_samp) <span class="ot">&lt;-</span> v_param_names</span>
+<span id="cb7-27"><a href="#cb7-27" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>n_param){</span>
+<span id="cb7-28"><a href="#cb7-28" aria-hidden="true" tabindex="-1"></a>            m_param_samp[, i] <span class="ot">&lt;-</span> <span class="fu">qunif</span>(m_lhs_unit[,i],</span>
+<span id="cb7-29"><a href="#cb7-29" aria-hidden="true" tabindex="-1"></a>                                       <span class="at">min =</span> lb[i],</span>
+<span id="cb7-30"><a href="#cb7-30" aria-hidden="true" tabindex="-1"></a>                                       <span class="at">max =</span> ub[i])</span>
+<span id="cb7-31"><a href="#cb7-31" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="cb7-32"><a href="#cb7-32" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span>(m_param_samp)</span>
+<span id="cb7-33"><a href="#cb7-33" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-34"><a href="#cb7-34" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-35"><a href="#cb7-35" aria-hidden="true" tabindex="-1"></a>    calc_log_prior <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params){</span>
+<span id="cb7-36"><a href="#cb7-36" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span>(<span class="fu">is.null</span>(<span class="fu">dim</span>(v_params))) { <span class="co"># If vector, change to matrix</span></span>
+<span id="cb7-37"><a href="#cb7-37" aria-hidden="true" tabindex="-1"></a>            v_params <span class="ot">&lt;-</span> <span class="fu">t</span>(v_params) </span>
+<span id="cb7-38"><a href="#cb7-38" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="cb7-39"><a href="#cb7-39" aria-hidden="true" tabindex="-1"></a>        n_samp <span class="ot">&lt;-</span> <span class="fu">nrow</span>(v_params)</span>
+<span id="cb7-40"><a href="#cb7-40" aria-hidden="true" tabindex="-1"></a>        <span class="fu">colnames</span>(v_params) <span class="ot">&lt;-</span> v_param_names</span>
+<span id="cb7-41"><a href="#cb7-41" aria-hidden="true" tabindex="-1"></a>        lprior <span class="ot">&lt;-</span> <span class="fu">rep</span>(<span class="dv">0</span>, n_samp)</span>
+<span id="cb7-42"><a href="#cb7-42" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> (i <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>n_param){</span>
+<span id="cb7-43"><a href="#cb7-43" aria-hidden="true" tabindex="-1"></a>            lprior <span class="ot">&lt;-</span> lprior <span class="sc">+</span> <span class="fu">dunif</span>(v_params[, i],</span>
+<span id="cb7-44"><a href="#cb7-44" aria-hidden="true" tabindex="-1"></a>                                     <span class="at">min =</span> lb[i],</span>
+<span id="cb7-45"><a href="#cb7-45" aria-hidden="true" tabindex="-1"></a>                                     <span class="at">max =</span> ub[i], </span>
+<span id="cb7-46"><a href="#cb7-46" aria-hidden="true" tabindex="-1"></a>                                     <span class="at">log =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb7-47"><a href="#cb7-47" aria-hidden="true" tabindex="-1"></a>            <span class="co"># ALTERNATIVE prior using beta distributions</span></span>
+<span id="cb7-48"><a href="#cb7-48" aria-hidden="true" tabindex="-1"></a>            <span class="co"># lprior &lt;- lprior + dbeta(v_params[, i],</span></span>
+<span id="cb7-49"><a href="#cb7-49" aria-hidden="true" tabindex="-1"></a>            <span class="co">#                          shape1 = 1,</span></span>
+<span id="cb7-50"><a href="#cb7-50" aria-hidden="true" tabindex="-1"></a>            <span class="co">#                          shape2 = 1, </span></span>
+<span id="cb7-51"><a href="#cb7-51" aria-hidden="true" tabindex="-1"></a>            <span class="co">#                          log = TRUE)</span></span>
+<span id="cb7-52"><a href="#cb7-52" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="cb7-53"><a href="#cb7-53" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span>(lprior)</span>
+<span id="cb7-54"><a href="#cb7-54" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-55"><a href="#cb7-55" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-56"><a href="#cb7-56" aria-hidden="true" tabindex="-1"></a>    prior <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params) { </span>
+<span id="cb7-57"><a href="#cb7-57" aria-hidden="true" tabindex="-1"></a>        <span class="fu">exp</span>(<span class="fu">calc_log_prior</span>(v_params)) </span>
+<span id="cb7-58"><a href="#cb7-58" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-59"><a href="#cb7-59" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-60"><a href="#cb7-60" aria-hidden="true" tabindex="-1"></a>    calc_log_lik <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params){</span>
+<span id="cb7-61"><a href="#cb7-61" aria-hidden="true" tabindex="-1"></a>        </span>
+<span id="cb7-62"><a href="#cb7-62" aria-hidden="true" tabindex="-1"></a>        <span class="co"># par_vector: a vector (or matrix) of model parameters </span></span>
+<span id="cb7-63"><a href="#cb7-63" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span>(<span class="fu">is.null</span>(<span class="fu">dim</span>(v_params))) { <span class="co"># If vector, change to matrix</span></span>
+<span id="cb7-64"><a href="#cb7-64" aria-hidden="true" tabindex="-1"></a>            v_params <span class="ot">&lt;-</span> <span class="fu">t</span>(v_params) </span>
+<span id="cb7-65"><a href="#cb7-65" aria-hidden="true" tabindex="-1"></a>        }</span>
+<span id="cb7-66"><a href="#cb7-66" aria-hidden="true" tabindex="-1"></a>        n_samp <span class="ot">&lt;-</span> <span class="fu">nrow</span>(v_params)</span>
+<span id="cb7-67"><a href="#cb7-67" aria-hidden="true" tabindex="-1"></a>        v_llik <span class="ot">&lt;-</span> <span class="fu">matrix</span>(<span class="dv">0</span>, <span class="at">nrow =</span> n_samp, <span class="at">ncol =</span> n_target) </span>
+<span id="cb7-68"><a href="#cb7-68" aria-hidden="true" tabindex="-1"></a>        llik_overall <span class="ot">&lt;-</span> <span class="fu">numeric</span>(n_samp)</span>
+<span id="cb7-69"><a href="#cb7-69" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span>(j <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>n_samp) { <span class="co"># j=1</span></span>
+<span id="cb7-70"><a href="#cb7-70" aria-hidden="true" tabindex="-1"></a>            jj <span class="ot">&lt;-</span> <span class="fu">tryCatch</span>( { </span>
+<span id="cb7-71"><a href="#cb7-71" aria-hidden="true" tabindex="-1"></a>                <span class="do">###   Run model for parameter set "v_params" </span><span class="al">###</span></span>
+<span id="cb7-72"><a href="#cb7-72" aria-hidden="true" tabindex="-1"></a>                model_res <span class="ot">&lt;-</span> <span class="fu">model_fn</span>(params, <span class="at">calibration_params =</span> <span class="fu">as.list</span>(v_params[j, ]))</span>
+<span id="cb7-73"><a href="#cb7-73" aria-hidden="true" tabindex="-1"></a>                </span>
+<span id="cb7-74"><a href="#cb7-74" aria-hidden="true" tabindex="-1"></a>                v_llik[j,] <span class="ot">&lt;-</span> <span class="fu">map2_dbl</span>(calibration_targets, <span class="fu">names</span>(calibration_targets), <span class="sc">~</span></span>
+<span id="cb7-75"><a href="#cb7-75" aria-hidden="true" tabindex="-1"></a>                                           ({</span>
+<span id="cb7-76"><a href="#cb7-76" aria-hidden="true" tabindex="-1"></a>                                               <span class="fu">sum</span>(<span class="fu">dnorm</span>(</span>
+<span id="cb7-77"><a href="#cb7-77" aria-hidden="true" tabindex="-1"></a>                                                   <span class="at">x =</span> .x[[<span class="st">"value"</span>]],</span>
+<span id="cb7-78"><a href="#cb7-78" aria-hidden="true" tabindex="-1"></a>                                                   <span class="at">mean =</span> model_res[[.y]],</span>
+<span id="cb7-79"><a href="#cb7-79" aria-hidden="true" tabindex="-1"></a>                                                   <span class="at">sd =</span> .x[[<span class="st">"se"</span>]],</span>
+<span id="cb7-80"><a href="#cb7-80" aria-hidden="true" tabindex="-1"></a>                                                   <span class="at">log =</span> <span class="cn">TRUE</span></span>
+<span id="cb7-81"><a href="#cb7-81" aria-hidden="true" tabindex="-1"></a>                                               ))</span>
+<span id="cb7-82"><a href="#cb7-82" aria-hidden="true" tabindex="-1"></a>                                           })) <span class="sc">%&gt;%</span></span>
+<span id="cb7-83"><a href="#cb7-83" aria-hidden="true" tabindex="-1"></a>                    <span class="fu">sum</span>()</span>
+<span id="cb7-84"><a href="#cb7-84" aria-hidden="true" tabindex="-1"></a>                </span>
+<span id="cb7-85"><a href="#cb7-85" aria-hidden="true" tabindex="-1"></a>                <span class="co"># OVERALL </span></span>
+<span id="cb7-86"><a href="#cb7-86" aria-hidden="true" tabindex="-1"></a>                llik_overall[j] <span class="ot">&lt;-</span> <span class="fu">sum</span>(v_llik[j, ])</span>
+<span id="cb7-87"><a href="#cb7-87" aria-hidden="true" tabindex="-1"></a>            }, <span class="at">error =</span> <span class="cf">function</span>(e) <span class="cn">NA</span>) </span>
+<span id="cb7-88"><a href="#cb7-88" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span>(<span class="fu">is.na</span>(jj)) { llik_overall[j] <span class="ot">&lt;-</span> <span class="sc">-</span><span class="cn">Inf</span> }</span>
+<span id="cb7-89"><a href="#cb7-89" aria-hidden="true" tabindex="-1"></a>        } <span class="co"># End loop over sampled parameter sets</span></span>
+<span id="cb7-90"><a href="#cb7-90" aria-hidden="true" tabindex="-1"></a>        <span class="co"># return LLIK</span></span>
+<span id="cb7-91"><a href="#cb7-91" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span>(llik_overall)</span>
+<span id="cb7-92"><a href="#cb7-92" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-93"><a href="#cb7-93" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-94"><a href="#cb7-94" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Function to calculate the (non-log) likelihood</span></span>
+<span id="cb7-95"><a href="#cb7-95" aria-hidden="true" tabindex="-1"></a>    likelihood <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params){ </span>
+<span id="cb7-96"><a href="#cb7-96" aria-hidden="true" tabindex="-1"></a>        <span class="fu">exp</span>(<span class="fu">calc_log_lik</span>(v_params)) </span>
+<span id="cb7-97"><a href="#cb7-97" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-98"><a href="#cb7-98" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-99"><a href="#cb7-99" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Assign the functions to the global environment</span></span>
+<span id="cb7-100"><a href="#cb7-100" aria-hidden="true" tabindex="-1"></a>    <span class="fu">assign</span>(<span class="st">"sample.prior"</span>, sample.prior, <span class="at">envir =</span> .GlobalEnv)</span>
+<span id="cb7-101"><a href="#cb7-101" aria-hidden="true" tabindex="-1"></a>    <span class="fu">assign</span>(<span class="st">"prior"</span>, prior, <span class="at">envir =</span> .GlobalEnv)</span>
+<span id="cb7-102"><a href="#cb7-102" aria-hidden="true" tabindex="-1"></a>    <span class="fu">assign</span>(<span class="st">"likelihood"</span>, likelihood, <span class="at">envir =</span> .GlobalEnv)</span>
+<span id="cb7-103"><a href="#cb7-103" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-104"><a href="#cb7-104" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Function that calculates the log-posterior</span></span>
+<span id="cb7-105"><a href="#cb7-105" aria-hidden="true" tabindex="-1"></a>    calc_log_post <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params) { </span>
+<span id="cb7-106"><a href="#cb7-106" aria-hidden="true" tabindex="-1"></a>        lpost <span class="ot">&lt;-</span> <span class="fu">calc_log_prior</span>(v_params) <span class="sc">+</span> <span class="fu">calc_log_lik</span>(v_params)</span>
+<span id="cb7-107"><a href="#cb7-107" aria-hidden="true" tabindex="-1"></a>        <span class="fu">return</span>(lpost) </span>
+<span id="cb7-108"><a href="#cb7-108" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-109"><a href="#cb7-109" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-110"><a href="#cb7-110" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Function that calculates the (non-log) posterior</span></span>
+<span id="cb7-111"><a href="#cb7-111" aria-hidden="true" tabindex="-1"></a>    calc_post <span class="ot">&lt;-</span> <span class="cf">function</span>(v_params) { </span>
+<span id="cb7-112"><a href="#cb7-112" aria-hidden="true" tabindex="-1"></a>        <span class="fu">exp</span>(<span class="fu">calc_log_post</span>(v_params)) </span>
+<span id="cb7-113"><a href="#cb7-113" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb7-114"><a href="#cb7-114" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-115"><a href="#cb7-115" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Run IMIS</span></span>
+<span id="cb7-116"><a href="#cb7-116" aria-hidden="true" tabindex="-1"></a>    fit_imis <span class="ot">&lt;-</span> IMIS<span class="sc">::</span><span class="fu">IMIS</span>(<span class="at">B =</span> <span class="dv">1000</span>, <span class="co"># the incremental sample size at each iteration of IMIS</span></span>
+<span id="cb7-117"><a href="#cb7-117" aria-hidden="true" tabindex="-1"></a>                           <span class="at">B.re =</span> n_resamp, <span class="co"># the desired posterior sample size</span></span>
+<span id="cb7-118"><a href="#cb7-118" aria-hidden="true" tabindex="-1"></a>                           <span class="at">number_k =</span> <span class="dv">10</span>, <span class="co"># the maximum number of iterations in IMIS</span></span>
+<span id="cb7-119"><a href="#cb7-119" aria-hidden="true" tabindex="-1"></a>                           <span class="at">D =</span> <span class="dv">0</span>) </span>
+<span id="cb7-120"><a href="#cb7-120" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-121"><a href="#cb7-121" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Obtain draws from posterior</span></span>
+<span id="cb7-122"><a href="#cb7-122" aria-hidden="true" tabindex="-1"></a>    m_calib_res <span class="ot">&lt;-</span> fit_imis<span class="sc">$</span>resample</span>
+<span id="cb7-123"><a href="#cb7-123" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-124"><a href="#cb7-124" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Calculate log-likelihood (overall fit) and posterior probability of each sample</span></span>
+<span id="cb7-125"><a href="#cb7-125" aria-hidden="true" tabindex="-1"></a>    m_calib_res <span class="ot">&lt;-</span> <span class="fu">cbind</span>(m_calib_res, </span>
+<span id="cb7-126"><a href="#cb7-126" aria-hidden="true" tabindex="-1"></a>                         <span class="st">"Overall_fit"</span> <span class="ot">=</span> <span class="fu">calc_log_lik</span>(m_calib_res[,v_param_names]),</span>
+<span id="cb7-127"><a href="#cb7-127" aria-hidden="true" tabindex="-1"></a>                         <span class="st">"Posterior_prob"</span> <span class="ot">=</span> <span class="fu">calc_post</span>(m_calib_res[,v_param_names]))</span>
+<span id="cb7-128"><a href="#cb7-128" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-129"><a href="#cb7-129" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Normalize posterior probability</span></span>
+<span id="cb7-130"><a href="#cb7-130" aria-hidden="true" tabindex="-1"></a>    m_calib_res[,<span class="st">"Posterior_prob"</span>] <span class="ot">&lt;-</span> m_calib_res[,<span class="st">"Posterior_prob"</span>]<span class="sc">/</span><span class="fu">sum</span>(m_calib_res[,<span class="st">"Posterior_prob"</span>])</span>
+<span id="cb7-131"><a href="#cb7-131" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-132"><a href="#cb7-132" aria-hidden="true" tabindex="-1"></a>    v_calib_post_mean <span class="ot">&lt;-</span> <span class="fu">colMeans</span>(m_calib_res[,v_param_names])</span>
+<span id="cb7-133"><a href="#cb7-133" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-134"><a href="#cb7-134" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Compute posterior median and 95% credible interval</span></span>
+<span id="cb7-135"><a href="#cb7-135" aria-hidden="true" tabindex="-1"></a>    m_calib_res_95cr <span class="ot">&lt;-</span> matrixStats<span class="sc">::</span><span class="fu">colQuantiles</span>(m_calib_res[,v_param_names], <span class="at">probs =</span> <span class="fu">c</span>(<span class="fl">0.025</span>, <span class="fl">0.5</span>, <span class="fl">0.975</span>))</span>
+<span id="cb7-136"><a href="#cb7-136" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-137"><a href="#cb7-137" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Compute maximum-a-posteriori (MAP) parameter set</span></span>
+<span id="cb7-138"><a href="#cb7-138" aria-hidden="true" tabindex="-1"></a>    v_calib_map <span class="ot">&lt;-</span> m_calib_res[<span class="fu">which.max</span>(m_calib_res[,<span class="st">"Posterior_prob"</span>]),]</span>
+<span id="cb7-139"><a href="#cb7-139" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-140"><a href="#cb7-140" aria-hidden="true" tabindex="-1"></a>    <span class="do">### Plot model-predicted output at mode vs targets </span><span class="al">###</span></span>
+<span id="cb7-141"><a href="#cb7-141" aria-hidden="true" tabindex="-1"></a>    v_out_best <span class="ot">&lt;-</span> <span class="fu">model_fn</span>(params, <span class="at">calibration_params =</span> v_calib_map[v_param_names])</span>
+<span id="cb7-142"><a href="#cb7-142" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-143"><a href="#cb7-143" aria-hidden="true" tabindex="-1"></a>    res <span class="ot">&lt;-</span> <span class="co"># Initial Comparson</span></span>
+<span id="cb7-144"><a href="#cb7-144" aria-hidden="true" tabindex="-1"></a>        <span class="fu">map2</span>(calibration_targets,</span>
+<span id="cb7-145"><a href="#cb7-145" aria-hidden="true" tabindex="-1"></a>             <span class="fu">model_fn</span>(params),</span>
+<span id="cb7-146"><a href="#cb7-146" aria-hidden="true" tabindex="-1"></a>             <span class="sc">~</span> (</span>
+<span id="cb7-147"><a href="#cb7-147" aria-hidden="true" tabindex="-1"></a>                 .x <span class="sc">%&gt;%</span> <span class="fu">select</span>(time, value, lb, ub) <span class="sc">%&gt;%</span></span>
+<span id="cb7-148"><a href="#cb7-148" aria-hidden="true" tabindex="-1"></a>                     <span class="fu">cbind.data.frame</span>(<span class="at">initial =</span></span>
+<span id="cb7-149"><a href="#cb7-149" aria-hidden="true" tabindex="-1"></a>                                          .y)</span>
+<span id="cb7-150"><a href="#cb7-150" aria-hidden="true" tabindex="-1"></a>             )) <span class="sc">%&gt;%</span> </span>
+<span id="cb7-151"><a href="#cb7-151" aria-hidden="true" tabindex="-1"></a>        <span class="fu">map2</span>(.,<span class="fu">model_fn</span>(params, <span class="at">calibration_params =</span> v_calib_post_mean),<span class="sc">~</span>({</span>
+<span id="cb7-152"><a href="#cb7-152" aria-hidden="true" tabindex="-1"></a>            .x <span class="sc">%&gt;%</span> <span class="fu">cbind.data.frame</span>(<span class="at">calibrated =</span> .y)</span>
+<span id="cb7-153"><a href="#cb7-153" aria-hidden="true" tabindex="-1"></a>        }))</span>
+<span id="cb7-154"><a href="#cb7-154" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-155"><a href="#cb7-155" aria-hidden="true" tabindex="-1"></a>    plot_calib <span class="ot">&lt;-</span> <span class="co"># plot initial comparison</span></span>
+<span id="cb7-156"><a href="#cb7-156" aria-hidden="true" tabindex="-1"></a>        res <span class="sc">%&gt;%</span> <span class="fu">map</span>(</span>
+<span id="cb7-157"><a href="#cb7-157" aria-hidden="true" tabindex="-1"></a>            <span class="sc">~</span> (</span>
+<span id="cb7-158"><a href="#cb7-158" aria-hidden="true" tabindex="-1"></a>                .x <span class="sc">%&gt;%</span> <span class="fu">ggplot</span>(<span class="fu">aes</span>(<span class="at">x =</span> time, <span class="at">y =</span> value)) <span class="sc">+</span> <span class="fu">geom_point</span>(<span class="at">colour =</span> <span class="st">"blue"</span>) <span class="sc">+</span> <span class="fu">geom_point</span>(<span class="fu">aes</span>(<span class="at">y =</span> initial), <span class="at">colour =</span> <span class="st">"red"</span>) <span class="sc">+</span></span>
+<span id="cb7-159"><a href="#cb7-159" aria-hidden="true" tabindex="-1"></a>                    hrbrthemes<span class="sc">::</span><span class="fu">theme_ipsum</span>() <span class="sc">+</span> <span class="fu">geom_errorbar</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lb, <span class="at">ymax =</span></span>
+<span id="cb7-160"><a href="#cb7-160" aria-hidden="true" tabindex="-1"></a>                                                                      ub)) <span class="sc">+</span></span>
+<span id="cb7-161"><a href="#cb7-161" aria-hidden="true" tabindex="-1"></a>                    <span class="fu">geom_point</span>(<span class="fu">aes</span>(<span class="at">y =</span> calibrated), <span class="at">colour =</span> <span class="st">"green"</span>)</span>
+<span id="cb7-162"><a href="#cb7-162" aria-hidden="true" tabindex="-1"></a>            )</span>
+<span id="cb7-163"><a href="#cb7-163" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb7-164"><a href="#cb7-164" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-165"><a href="#cb7-165" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-166"><a href="#cb7-166" aria-hidden="true" tabindex="-1"></a>    out <span class="ot">&lt;-</span> <span class="fu">list</span>(<span class="at">values =</span> v_calib_map[v_param_names], </span>
+<span id="cb7-167"><a href="#cb7-167" aria-hidden="true" tabindex="-1"></a>                <span class="at">mean =</span> v_calib_post_mean,</span>
+<span id="cb7-168"><a href="#cb7-168" aria-hidden="true" tabindex="-1"></a>                <span class="at">ci =</span> m_calib_res_95cr,</span>
+<span id="cb7-169"><a href="#cb7-169" aria-hidden="true" tabindex="-1"></a>                <span class="at">res =</span> m_calib_res,</span>
+<span id="cb7-170"><a href="#cb7-170" aria-hidden="true" tabindex="-1"></a>                <span class="at">plot =</span> plot_calib)   </span>
+<span id="cb7-171"><a href="#cb7-171" aria-hidden="true" tabindex="-1"></a>    </span>
+<span id="cb7-172"><a href="#cb7-172" aria-hidden="true" tabindex="-1"></a>    <span class="fu">return</span>(out)</span>
+<span id="cb7-173"><a href="#cb7-173" aria-hidden="true" tabindex="-1"></a>}</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+</div>
+<div class="cell">
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>res_imis <span class="ot">&lt;-</span> <span class="fu">calibrate_model_imis</span>(</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    <span class="at">params =</span> params,</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    <span class="at">parameters_to_calibrate =</span> parameters_to_calibrate,</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    <span class="at">seed =</span> <span class="dv">072218</span>,</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    <span class="at">n_init =</span> <span class="dv">1</span>,</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>    <span class="at">model_fn =</span> run_sick_sicker_markov,</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>    <span class="at">calibration_targets =</span> lst_targets</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+<details class="code-fold">
+<summary>Calibration via IMIS</summary>
+<div class="sourceCode cell-code" id="cb9"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a>result_imis <span class="ot">&lt;-</span> <span class="fu">map2</span>(result_init,<span class="fu">run_sick_sicker_markov</span>(params, res_imis<span class="sc">$</span>values),<span class="sc">~</span>({</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>    .x <span class="sc">%&gt;%</span> <span class="fu">cbind.data.frame</span>(<span class="at">calibrated_de =</span> .y)</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>}))</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>plot_calib <span class="ot">&lt;-</span> <span class="co"># plot initial comparison</span></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>    result_imis <span class="sc">%&gt;%</span> <span class="fu">map</span>(</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>        <span class="sc">~</span> (</span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>            .x <span class="sc">%&gt;%</span> <span class="fu">as_tibble</span>() <span class="sc">%&gt;%</span> </span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">gather</span>(var, value, <span class="sc">-</span>time, <span class="sc">-</span>lb, <span class="sc">-</span>ub)  <span class="sc">%&gt;%</span> </span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">ggplot</span>(<span class="fu">aes</span>(<span class="at">x =</span> time, <span class="at">y =</span> value, <span class="at">colour =</span> var)) <span class="sc">+</span> </span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>() <span class="sc">+</span> </span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_errorbar</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lb, <span class="at">ymax =</span> ub, <span class="at">colour =</span> var)) <span class="sc">+</span> </span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>    ggsci<span class="sc">::</span><span class="fu">scale_color_aaas</span>(<span class="at">name =</span> <span class="st">"Model Outcome"</span>, <span class="at">labels =</span> <span class="fu">c</span>(<span class="st">"Calibrated"</span>,<span class="st">"Initial"</span>,<span class="st">"Target"</span>)) <span class="sc">+</span> </span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a>    hrbrthemes<span class="sc">::</span><span class="fu">theme_ipsum</span>() <span class="sc">+</span> </span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(</span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.position =</span> <span class="fu">c</span>(<span class="fl">0.8</span>,<span class="fl">0.8</span>),  <span class="co"># Position inside the plot</span></span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.background =</span> <span class="fu">element_rect</span>(</span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a>      <span class="at">fill =</span> <span class="st">"white"</span>,  <span class="co"># Semi-transparent background</span></span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a>      <span class="at">color =</span> <span class="st">"black"</span></span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a>    ),</span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.title =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">12</span>),</span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.text =</span> <span class="fu">element_text</span>(<span class="at">size =</span> <span class="dv">10</span>)</span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a>  )  <span class="sc">+</span> </span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">"Cycle"</span>, <span class="at">y =</span> <span class="st">"Value"</span>)</span>
+<span id="cb9-25"><a href="#cb9-25" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb9-26"><a href="#cb9-26" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb9-27"><a href="#cb9-27" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">1</span>]]</span>
+<span id="cb9-28"><a href="#cb9-28" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">2</span>]]</span>
+<span id="cb9-29"><a href="#cb9-29" aria-hidden="true" tabindex="-1"></a>plot_calib[[<span class="dv">3</span>]]</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</details>
+<div class="cell quarto-layout-panel" data-layout-ncol="3">
+<div class="quarto-layout-row">
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-10-1.png" class="lightbox" data-gallery="quarto-lightbox-gallery-7" title="Survivial"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-10-1.png" class="img-fluid figure-img" width="672" alt="Survivial"></a></p>
+<figcaption>Survivial</figcaption>
+</figure>
+</div>
+</div>
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-10-2.png" class="lightbox" data-gallery="quarto-lightbox-gallery-8" title="Disease Prevalence"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-10-2.png" class="img-fluid figure-img" width="672" alt="Disease Prevalence"></a></p>
+<figcaption>Disease Prevalence</figcaption>
+</figure>
+</div>
+</div>
+<div class="quarto-layout-cell" style="flex-basis: 33.3%;justify-content: flex-start;">
+<div class="quarto-figure quarto-figure-center">
+<figure class="figure">
+<p><a href="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-10-3.png" class="lightbox" data-gallery="quarto-lightbox-gallery-9" title="Proportion in S1 State"><img src="imis-calibration-sick-sicker_files/figure-html/unnamed-chunk-10-3.png" class="img-fluid figure-img" width="672" alt="Proportion in S1 State"></a></p>
+<figcaption>Proportion in S1 State</figcaption>
+</figure>
+</div>
+</div>
 </div>
 </div>
 <div class="cell">
-<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="do">## ----parameterize------------------------------------------------------------------------------------------------------------------------------</span></span>
-<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>params_ <span class="ot">&lt;-</span> <span class="fu">list</span>(</span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">v_tx_names =</span> <span class="fu">c</span>(<span class="st">"SoC"</span>,<span class="st">"A"</span>,<span class="st">"B"</span>,<span class="st">"AB"</span>),        <span class="co"># treatment names</span></span>
-<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">n_tx =</span> <span class="dv">4</span>,                                  <span class="co"># number of treatment strategies</span></span>
-<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>  <span class="at">cycle_correction =</span> <span class="st">"Simpson1/3"</span>,           <span class="co"># cycle correction method</span></span>
-<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>  <span class="at">v_tr_names =</span> <span class="fu">c</span>(<span class="st">"H"</span>,<span class="st">"S1"</span>,<span class="st">"S2"</span>),             <span class="co"># transient health states</span></span>
-<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>  <span class="at">v_ab_names =</span> <span class="fu">c</span>(<span class="st">"DOC"</span>,<span class="st">"DS"</span>),                <span class="co"># absorbing health states</span></span>
-<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>  <span class="at">n_states =</span> <span class="dv">5</span>,                              <span class="co"># total number of health states</span></span>
-<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>  <span class="at">horizon =</span> <span class="dv">75</span>,                             <span class="co"># Model time horizon (years)</span></span>
-<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>  <span class="at">r_v_disc_h  =</span> <span class="fl">0.03</span>,                        <span class="co"># annual discount rate (health)</span></span>
-<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>  <span class="at">r_v_disc_c =</span> <span class="fl">0.03</span>,                         <span class="co"># annual discount rate (costs)</span></span>
-<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>  <span class="at">Delta_t =</span> <span class="dv">1</span>,                               <span class="co"># time step (1 = yearly)</span></span>
-<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>  <span class="at">age0 =</span> <span class="dv">25</span>,                                 <span class="co"># age at baseline</span></span>
-<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-23"><a href="#cb2-23" aria-hidden="true" tabindex="-1"></a>  <span class="at">v_s0T =</span> <span class="fu">c</span>(<span class="dv">1</span>,<span class="dv">0</span>,<span class="dv">0</span>,<span class="dv">0</span>,<span class="dv">0</span>),                      <span class="co"># initial state occupancy  </span></span>
-<span id="cb2-24"><a href="#cb2-24" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-25"><a href="#cb2-25" aria-hidden="true" tabindex="-1"></a>  <span class="at">r_HS1 =</span> <span class="fl">0.15</span>,                              <span class="co"># disease onset rate</span></span>
-<span id="cb2-26"><a href="#cb2-26" aria-hidden="true" tabindex="-1"></a>  <span class="at">r_S1H =</span> <span class="fl">0.5</span>,                               <span class="co"># recovery rate</span></span>
-<span id="cb2-27"><a href="#cb2-27" aria-hidden="true" tabindex="-1"></a>  <span class="at">r_S1S2 =</span> <span class="fl">0.105</span>,                            <span class="co"># disease progression rate</span></span>
-<span id="cb2-28"><a href="#cb2-28" aria-hidden="true" tabindex="-1"></a>  <span class="at">r_HD =</span> .<span class="dv">002</span>,                               <span class="co"># background mortality rate</span></span>
-<span id="cb2-29"><a href="#cb2-29" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-30"><a href="#cb2-30" aria-hidden="true" tabindex="-1"></a>  <span class="at">hr_S1 =</span> <span class="fl">3.0</span>,                               <span class="co"># hazard rate of disease-related death from S1 state</span></span>
-<span id="cb2-31"><a href="#cb2-31" aria-hidden="true" tabindex="-1"></a>  <span class="at">hr_S2 =</span> <span class="fl">10.0</span>,                              <span class="co"># hazard rate of disease-related death from S2 state</span></span>
-<span id="cb2-32"><a href="#cb2-32" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-33"><a href="#cb2-33" aria-hidden="true" tabindex="-1"></a>  <span class="at">u_H =</span> <span class="dv">1</span>,                                   <span class="co"># Healthy utility weight</span></span>
-<span id="cb2-34"><a href="#cb2-34" aria-hidden="true" tabindex="-1"></a>  <span class="at">u_S1 =</span> <span class="fl">0.75</span>,                               <span class="co"># Sick utility weight</span></span>
-<span id="cb2-35"><a href="#cb2-35" aria-hidden="true" tabindex="-1"></a>  <span class="at">u_S2 =</span> <span class="fl">0.5</span>,                                <span class="co"># Sicker utility weight</span></span>
-<span id="cb2-36"><a href="#cb2-36" aria-hidden="true" tabindex="-1"></a>  <span class="at">u_D =</span> <span class="dv">0</span>,                                   <span class="co"># Death utility weight</span></span>
-<span id="cb2-37"><a href="#cb2-37" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-38"><a href="#cb2-38" aria-hidden="true" tabindex="-1"></a>  <span class="at">c_H =</span> <span class="dv">2000</span>,                                <span class="co"># annual cost of healthy</span></span>
-<span id="cb2-39"><a href="#cb2-39" aria-hidden="true" tabindex="-1"></a>  <span class="at">c_S1 =</span> <span class="dv">4000</span>,                               <span class="co"># annual cost of S1</span></span>
-<span id="cb2-40"><a href="#cb2-40" aria-hidden="true" tabindex="-1"></a>  <span class="at">c_S2 =</span> <span class="dv">15000</span>,                              <span class="co"># annual cost of S2</span></span>
-<span id="cb2-41"><a href="#cb2-41" aria-hidden="true" tabindex="-1"></a>  <span class="at">c_D =</span> <span class="dv">0</span>,                                   <span class="co"># annual cost of death</span></span>
-<span id="cb2-42"><a href="#cb2-42" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-43"><a href="#cb2-43" aria-hidden="true" tabindex="-1"></a>  <span class="at">c_trtA =</span> <span class="dv">12000</span>,                            <span class="co"># cost of treatment A</span></span>
-<span id="cb2-44"><a href="#cb2-44" aria-hidden="true" tabindex="-1"></a>  <span class="at">u_trtA =</span> <span class="fl">0.95</span>,                             <span class="co"># utility weight for treatment A (S1 state)</span></span>
-<span id="cb2-45"><a href="#cb2-45" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-46"><a href="#cb2-46" aria-hidden="true" tabindex="-1"></a>  <span class="at">c_trtB =</span> <span class="dv">13000</span>,                            <span class="co"># cost of treatment B</span></span>
-<span id="cb2-47"><a href="#cb2-47" aria-hidden="true" tabindex="-1"></a>  <span class="at">hr_S1S2_trtB =</span> <span class="fl">0.6</span>                        <span class="co"># reduction in rate of disease progression </span></span>
-<span id="cb2-48"><a href="#cb2-48" aria-hidden="true" tabindex="-1"></a>  </span>
-<span id="cb2-49"><a href="#cb2-49" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb2-50"><a href="#cb2-50" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-51"><a href="#cb2-51" aria-hidden="true" tabindex="-1"></a>params <span class="ot">&lt;-</span> </span>
-<span id="cb2-52"><a href="#cb2-52" aria-hidden="true" tabindex="-1"></a>  <span class="fu">with</span>(params_,{</span>
-<span id="cb2-53"><a href="#cb2-53" aria-hidden="true" tabindex="-1"></a>    <span class="fu">modifyList</span>(params_,<span class="fu">list</span>(</span>
-<span id="cb2-54"><a href="#cb2-54" aria-hidden="true" tabindex="-1"></a>      <span class="at">v_names_states =</span> <span class="fu">c</span>(v_tr_names, v_ab_names), <span class="co"># health state names</span></span>
-<span id="cb2-55"><a href="#cb2-55" aria-hidden="true" tabindex="-1"></a>      <span class="at">omega =</span> horizon<span class="sc">/</span>Delta_t,  <span class="co"># Total number of cycles</span></span>
-<span id="cb2-56"><a href="#cb2-56" aria-hidden="true" tabindex="-1"></a>      <span class="at">r_v_disc_h_Delta_t =</span> r_v_disc_h <span class="sc">*</span> Delta_t,  <span class="co"># Cycle discount rate: health outcomes</span></span>
-<span id="cb2-57"><a href="#cb2-57" aria-hidden="true" tabindex="-1"></a>      <span class="at">r_v_disc_c_Delta_t =</span> r_v_disc_c <span class="sc">*</span> Delta_t,  <span class="co"># Cycle discount rate: cost outcomes</span></span>
-<span id="cb2-58"><a href="#cb2-58" aria-hidden="true" tabindex="-1"></a>      <span class="at">ages =</span> (<span class="dv">0</span><span class="sc">:</span>(horizon<span class="sc">/</span>Delta_t))<span class="sc">*</span>Delta_t <span class="sc">+</span> age0</span>
-<span id="cb2-59"><a href="#cb2-59" aria-hidden="true" tabindex="-1"></a>    ))</span>
-<span id="cb2-60"><a href="#cb2-60" aria-hidden="true" tabindex="-1"></a>  })</span>
-<span id="cb2-61"><a href="#cb2-61" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-62"><a href="#cb2-62" aria-hidden="true" tabindex="-1"></a>params<span class="sc">$</span>ages_trace <span class="ot">&lt;-</span> params<span class="sc">$</span>ages</span>
-<span id="cb2-63"><a href="#cb2-63" aria-hidden="true" tabindex="-1"></a>params<span class="sc">$</span>ages <span class="ot">&lt;-</span> params<span class="sc">$</span>ages[<span class="sc">-</span><span class="fu">length</span>(params<span class="sc">$</span>ages)] </span>
-<span id="cb2-64"><a href="#cb2-64" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-65"><a href="#cb2-65" aria-hidden="true" tabindex="-1"></a><span class="co"># Discounting vectors </span></span>
-<span id="cb2-66"><a href="#cb2-66" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-67"><a href="#cb2-67" aria-hidden="true" tabindex="-1"></a>v_discD_h <span class="ot">=</span>  <span class="co"># Discrete time discounting: health outcomes</span></span>
-<span id="cb2-68"><a href="#cb2-68" aria-hidden="true" tabindex="-1"></a>  <span class="dv">1</span> <span class="sc">/</span> ((<span class="dv">1</span> <span class="sc">+</span> (params<span class="sc">$</span>r_v_disc_h_Delta_t)) <span class="sc">^</span> (<span class="dv">0</span><span class="sc">:</span>params<span class="sc">$</span>omega))</span>
-<span id="cb2-69"><a href="#cb2-69" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb2-70"><a href="#cb2-70" aria-hidden="true" tabindex="-1"></a>v_discD_c <span class="ot">=</span> </span>
-<span id="cb2-71"><a href="#cb2-71" aria-hidden="true" tabindex="-1"></a>  <span class="dv">1</span> <span class="sc">/</span> ((<span class="dv">1</span> <span class="sc">+</span> (params<span class="sc">$</span>r_v_disc_c_Delta_t)) <span class="sc">^</span> (<span class="dv">0</span><span class="sc">:</span>params<span class="sc">$</span>omega))</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="fu">cbind.data.frame</span>(<span class="at">de =</span> res_de<span class="sc">$</span>param, <span class="at">imis =</span> res_imis<span class="sc">$</span>values, res_imis<span class="sc">$</span>ci) <span class="sc">%&gt;%</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    <span class="fu">mutate_all</span>(<span class="cf">function</span>(x)</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>        <span class="fu">round</span>(x, <span class="dv">4</span>)) <span class="sc">%&gt;%</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    <span class="fu">rownames_to_column</span>(<span class="at">var =</span> <span class="st">"parameter"</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">regulartable</span>() <span class="sc">%&gt;%</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">colformat_num</span>(<span class="at">j =</span> <span class="dv">2</span><span class="sc">:</span><span class="dv">6</span>, <span class="at">digits =</span> <span class="dv">1</span>) <span class="sc">%&gt;%</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">add_header_row</span>(<span class="at">values =</span> <span class="fu">c</span>(<span class="st">""</span>, <span class="st">"DE"</span>, <span class="st">"IMIS"</span>),</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>                   <span class="at">colwidths =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">1</span>, <span class="dv">4</span>)) <span class="sc">%&gt;%</span></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">align</span>(<span class="at">i =</span> <span class="dv">1</span>, <span class="at">align =</span> <span class="st">"center"</span>, <span class="at">part =</span> <span class="st">"header"</span>)  <span class="sc">%&gt;%</span> </span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">set_header_labels</span>(</span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a>        <span class="at">parameter =</span> <span class="st">"Parameter"</span>,</span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a>        <span class="at">de =</span> <span class="st">"Value"</span>,</span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>        <span class="at">imis =</span> <span class="st">"Value"</span></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true" tabindex="-1"></a>    )</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output-display">
+<div class="tabwid"><style>.cl-484d9084{}.cl-484b36ea{font-family:'Helvetica';font-size:11pt;font-weight:normal;font-style:normal;text-decoration:none;color:rgba(0, 0, 0, 1.00);background-color:transparent;}.cl-484c260e{margin:0;text-align:center;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-484c260f{margin:0;text-align:left;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-484c2618{margin:0;text-align:right;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);padding-bottom:5pt;padding-top:5pt;padding-left:5pt;padding-right:5pt;line-height: 1;background-color:transparent;}.cl-484c2d34{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-484c2d35{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-484c2d3e{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 1.5pt solid rgba(102, 102, 102, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-484c2d3f{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-484c2d48{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 0 solid rgba(0, 0, 0, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-484c2d49{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}.cl-484c2d4a{width:0.75in;background-color:transparent;vertical-align: middle;border-bottom: 1.5pt solid rgba(102, 102, 102, 1.00);border-top: 0 solid rgba(0, 0, 0, 1.00);border-left: 0 solid rgba(0, 0, 0, 1.00);border-right: 0 solid rgba(0, 0, 0, 1.00);margin-bottom:0;margin-top:0;margin-left:0;margin-right:0;}</style><table data-quarto-disable-processing="true" class="cl-484d9084"><thead><tr style="overflow-wrap:break-word;"><th class="cl-484c2d34"><p class="cl-484c260e"><span class="cl-484b36ea"></span></p></th><th class="cl-484c2d34"><p class="cl-484c260e"><span class="cl-484b36ea">DE</span></p></th><th colspan="4" class="cl-484c2d34"><p class="cl-484c260e"><span class="cl-484b36ea">IMIS</span></p></th></tr><tr style="overflow-wrap:break-word;"><th class="cl-484c2d35"><p class="cl-484c260f"><span class="cl-484b36ea">Parameter</span></p></th><th class="cl-484c2d3e"><p class="cl-484c2618"><span class="cl-484b36ea">Value</span></p></th><th class="cl-484c2d3e"><p class="cl-484c2618"><span class="cl-484b36ea">Value</span></p></th><th class="cl-484c2d3e"><p class="cl-484c2618"><span class="cl-484b36ea">2.5%</span></p></th><th class="cl-484c2d3e"><p class="cl-484c2618"><span class="cl-484b36ea">50%</span></p></th><th class="cl-484c2d3e"><p class="cl-484c2618"><span class="cl-484b36ea">97.5%</span></p></th></tr></thead><tbody><tr style="overflow-wrap:break-word;"><td class="cl-484c2d3f"><p class="cl-484c260f"><span class="cl-484b36ea">r_S1S2</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">0.1173</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">0.1173</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">0.1101</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">0.1172</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">0.1238</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-484c2d3f"><p class="cl-484c260f"><span class="cl-484b36ea">hr_S1</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">2.1169</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">2.1874</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">1.1470</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">2.1629</span></p></td><td class="cl-484c2d48"><p class="cl-484c2618"><span class="cl-484b36ea">3.4144</span></p></td></tr><tr style="overflow-wrap:break-word;"><td class="cl-484c2d49"><p class="cl-484c260f"><span class="cl-484b36ea">hr_S2</span></p></td><td class="cl-484c2d4a"><p class="cl-484c2618"><span class="cl-484b36ea">11.8666</span></p></td><td class="cl-484c2d4a"><p class="cl-484c2618"><span class="cl-484b36ea">11.8144</span></p></td><td class="cl-484c2d4a"><p class="cl-484c2618"><span class="cl-484b36ea">10.5007</span></p></td><td class="cl-484c2d4a"><p class="cl-484c2618"><span class="cl-484b36ea">11.8015</span></p></td><td class="cl-484c2d4a"><p class="cl-484c2618"><span class="cl-484b36ea">12.9011</span></p></td></tr></tbody></table></div>
 </div>
-</section>
+</div>
+
 </section>
 
-</main>
+<div id="quarto-appendix" class="default"><section class="quarto-appendix-contents" role="doc-bibliography" id="quarto-bibliography"><h2 class="anchored quarto-appendix-heading">References</h2><div id="refs" class="references csl-bib-body hanging-indent" data-entry-spacing="0" role="list">
+<div id="ref-das2010differential" class="csl-entry" role="listitem">
+Das, Swagatam, and Ponnuthurai Nagaratnam Suganthan. 2010. <span>“Differential Evolution: A Survey of the State-of-the-Art.”</span> <em>IEEE Transactions on Evolutionary Computation</em> 15 (1): 4–31.
+</div>
+<div id="ref-steele2006computing" class="csl-entry" role="listitem">
+Steele, Russell J, Adrian E Raftery, and Mary J Emond. 2006. <span>“Computing Normalizing Constants for Finite Mixture Models via Incremental Mixture Importance Sampling (IMIS).”</span> <em>Journal of Computational and Graphical Statistics</em> 15 (3): 712–34.
+</div>
+</div></section></div></main>
 <!-- /main column -->
 <script id="quarto-html-after-body" type="application/javascript">
 window.document.addEventListener("DOMContentLoaded", function (event) {
@@ -678,6 +1365,38 @@ window.document.addEventListener("DOMContentLoaded", function (event) {
 });
 </script>
 </div> <!-- /content -->
+<script>var lightboxQuarto = GLightbox({"selector":".lightbox","loop":false,"descPosition":"bottom","closeEffect":"zoom","openEffect":"zoom"});
+(function() {
+  let previousOnload = window.onload;
+  window.onload = () => {
+    if (previousOnload) {
+      previousOnload();
+    }
+    lightboxQuarto.on('slide_before_load', (data) => {
+      const { slideIndex, slideNode, slideConfig, player, trigger } = data;
+      const href = trigger.getAttribute('href');
+      if (href !== null) {
+        const imgEl = window.document.querySelector(`a[href="${href}"] img`);
+        if (imgEl !== null) {
+          const srcAttr = imgEl.getAttribute("src");
+          if (srcAttr && srcAttr.startsWith("data:")) {
+            slideConfig.href = srcAttr;
+          }
+        }
+      } 
+    });
+  
+    lightboxQuarto.on('slide_after_load', (data) => {
+      const { slideIndex, slideNode, slideConfig, player, trigger } = data;
+      if (window.Quarto?.typesetMath) {
+        window.Quarto.typesetMath(slideNode);
+      }
+    });
+  
+  };
+  
+})();
+          </script>
 
 
 
